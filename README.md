@@ -63,7 +63,7 @@ ollama pull llava:7b              # 4.7 GB — vision / image analysis
 ### 2. Clone and Setup
 
 ```bash
-git clone https://github.com/rampypi/mac.git
+git clone https://github.com/23f2003700/mac.git
 cd mac
 
 python -m venv venv
