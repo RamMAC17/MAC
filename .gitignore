@@ -1,0 +1,51 @@
+# Byte-compiled
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+venv/
+.venv/
+env/
+
+# Environment
+.env
+
+# Database
+*.db
+*.db-journal
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Docs build artifacts
+docs/*.pdf
+docs/*.docx
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Uploads (user content)
+uploads/*
+!uploads/.gitkeep
+
+# Logs
+logs/
+*.log
+
+# Docker volumes
+pgdata/
+redisdata/
+
+# Keys
+*.pem
+*.key
