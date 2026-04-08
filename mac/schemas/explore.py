@@ -7,6 +7,7 @@ from typing import Optional, List, Dict, Any
 class ModelInfo(BaseModel):
     id: str
     name: str
+    model_type: str = "chat"  # chat, stt, tts, embedding, vision
     specialty: str = ""
     parameters: str = ""
     context_length: int = 4096

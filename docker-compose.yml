@@ -42,6 +42,9 @@ services:
       - VLLM_CODE_URL=http://vllm-code:8002
       - VLLM_REASONING_URL=http://vllm-reason:8003
       - VLLM_INTELLIGENCE_URL=http://vllm-intel:8004
+      - WHISPER_URL=http://whisper:8005
+      - TTS_URL=http://tts:8006
+      - EMBEDDING_URL=http://vllm-speed:8001
       - QDRANT_URL=http://qdrant:6333
       - SEARXNG_URL=http://searxng:8080
     depends_on:
@@ -173,6 +176,62 @@ services:
   #     - mac-net
 
   # ═══════════════════════════════════════════════════════
+  #  SPEECH & AUDIO SERVICES  (OPTIONAL)
+  #  Uncomment to enable STT and TTS.
+  #  Whisper uses GPU if available, falls back to CPU.
+  #  Piper TTS is CPU-only and very lightweight.
+  # ═══════════════════════════════════════════════════════
+
+  # ── Whisper — Speech-to-Text (faster-whisper-server) ───
+  # OpenAI-compatible /v1/audio/transcriptions endpoint.
+  # Uses ~1 GB VRAM for small, ~2 GB for medium, ~4 GB for large-v3.
+  # whisper:
+  #   image: fedirz/faster-whisper-server:latest-cuda
+  #   container_name: mac-whisper
+  #   ports:
+  #     - "${WHISPER_PORT:-8005}:8000"
+  #   environment:
+  #     - WHISPER__MODEL=${WHISPER_MODEL:-Systran/faster-whisper-small}
+  #     - WHISPER__DEVICE=auto
+  #   deploy:
+  #     resources:
+  #       reservations:
+  #         devices:
+  #           - driver: nvidia
+  #             count: 1
+  #             capabilities: [gpu]
+  #   restart: unless-stopped
+  #   networks:
+  #     - mac-net
+
+  # ── Whisper CPU-Only (for machines without GPU) ────────
+  # whisper:
+  #   image: fedirz/faster-whisper-server:latest-cpu
+  #   container_name: mac-whisper
+  #   ports:
+  #     - "${WHISPER_PORT:-8005}:8000"
+  #   environment:
+  #     - WHISPER__MODEL=${WHISPER_MODEL:-Systran/faster-whisper-small}
+  #     - WHISPER__DEVICE=cpu
+  #   restart: unless-stopped
+  #   networks:
+  #     - mac-net
+
+  # ── Piper TTS — Text-to-Speech (CPU, lightweight) ─────
+  # OpenAI-compatible /v1/audio/speech endpoint.
+  # Very low resource: ~50 MB RAM, CPU only, fast.
+  # tts:
+  #   image: ghcr.io/matatonic/openedai-speech:latest
+  #   container_name: mac-tts
+  #   ports:
+  #     - "${TTS_PORT:-8006}:8000"
+  #   volumes:
+  #     - tts-voices:/app/voices
+  #   restart: unless-stopped
+  #   networks:
+  #     - mac-net
+
+  # ═══════════════════════════════════════════════════════
   #  INFRASTRUCTURE SERVICES
   # ═══════════════════════════════════════════════════════
 
@@ -261,6 +320,7 @@ volumes:
   qdrantdata:
   searxngdata:
   hf-cache:      # Shared HuggingFace model cache across all vLLM instances
+  tts-voices:    # Persisted TTS voice models
 
 networks:
   mac-net:

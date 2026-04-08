@@ -777,10 +777,6 @@ function renderChat() {
           <span>Model:</span>
           <select id="model-select">
             <option value="auto" selected>Auto (Smart Route)</option>
-            <option value="qwen2.5-coder:7b">Qwen2.5-Coder 7B</option>
-            <option value="deepseek-r1:8b">DeepSeek-R1 8B</option>
-            <option value="qwen2.5:14b">Qwen2.5 14B</option>
-            <option value="qwen2.5:7b">Qwen2.5 7B</option>
           </select>
           <span id="chat-status" style="margin-left:auto"></span>
         </div>
@@ -816,6 +812,23 @@ function bindChat() {
     const item = e.target.closest('.session-item');
     if (item) loadSession(item.dataset.id);
   };
+  loadModelOptions();
+}
+
+async function loadModelOptions() {
+  const sel = document.getElementById('model-select');
+  try {
+    const resp = await fetch(API + '/explore/models?model_type=chat&per_page=50');
+    if (!resp.ok) return;
+    const data = await resp.json();
+    (data.models || []).forEach(m => {
+      const opt = document.createElement('option');
+      opt.value = m.id;
+      opt.textContent = m.name + (m.parameters ? ' (' + m.parameters + ')' : '');
+      sel.appendChild(opt);
+    });
+  } catch (e) { /* API offline — auto option is enough */ }
+  if (currentSession && currentSession.model) sel.value = currentSession.model;
 }
 
 function newChat() {

@@ -11,7 +11,7 @@ from mac.schemas.chat import (
     CompletionRequest, CompletionResponse, CompletionChoice,
     EmbeddingRequest, EmbeddingResponse,
     RerankRequest, RerankResponse, RerankResult,
-    STTResponse,
+    STTResponse, TTSRequest,
 )
 from mac.services import llm_service
 from mac.services.usage_service import log_request
@@ -265,12 +265,12 @@ async def vision(
 @router.post("/speech-to-text", response_model=STTResponse)
 async def speech_to_text(
     audio: UploadFile = File(..., description="Audio file (mp3, wav, ogg, m4a)"),
-    model: str = Form(default="whisper-large-v3"),
+    model: str = Form(default="default"),
     language: str = Form(default="en"),
     user: User = Depends(check_rate_limit),
     db: AsyncSession = Depends(get_db),
 ):
-    """Speech-to-text — transcribe audio to text (requires Whisper model)."""
+    """Speech-to-text — transcribe audio via Whisper endpoint."""
     allowed_types = {"audio/mpeg", "audio/wav", "audio/ogg", "audio/mp4",
                      "audio/x-wav", "audio/webm", "audio/mp3", "audio/m4a"}
     if image_type := audio.content_type:
@@ -284,9 +284,78 @@ async def speech_to_text(
     if len(raw) > 50 * 1024 * 1024:
         raise HTTPException(status_code=413, detail="Audio must be under 50 MB")
 
-    # Whisper via Ollama is not natively supported yet — return 501
-    raise HTTPException(status_code=501, detail={
-        "code": "not_implemented",
-        "message": "Speech-to-text requires a Whisper endpoint. "
-                   "Configure WHISPER_API_URL in .env to use an external Whisper service.",
+    try:
+        result = await llm_service.speech_to_text(
+            audio_bytes=raw,
+            filename=audio.filename or "audio.wav",
+            model=model,
+            language=language,
+        )
+    except RuntimeError as e:
+        raise HTTPException(status_code=501, detail={
+            "code": "not_configured",
+            "message": str(e),
+        })
+    except Exception as e:
+        raise HTTPException(status_code=503, detail={
+            "code": "model_unavailable",
+            "message": f"Speech-to-text failed: {str(e)}",
+        })
+
+    await log_request(
+        db, user.id, result.get("model", "whisper"), "/query/speech-to-text",
+        tokens_in=0, tokens_out=0,
+        latency_ms=result.get("_latency_ms", 0),
+        status_code=200,
+        request_id=result["id"],
+    )
+
+    return STTResponse(
+        id=result["id"],
+        model=result["model"],
+        text=result["text"],
+        language=result["language"],
+        duration_seconds=result["duration_seconds"],
+        segments=result.get("segments", []),
+    )
+
+
+@router.post("/text-to-speech")
+async def text_to_speech(
+    body: TTSRequest,
+    user: User = Depends(check_rate_limit),
+    db: AsyncSession = Depends(get_db),
+):
+    """Text-to-speech — generate audio from text via TTS endpoint."""
+    try:
+        audio_bytes = await llm_service.text_to_speech(
+            text=body.text,
+            voice=body.voice,
+            speed=body.speed,
+            response_format=body.response_format,
+        )
+    except RuntimeError as e:
+        raise HTTPException(status_code=501, detail={
+            "code": "not_configured",
+            "message": str(e),
+        })
+    except Exception as e:
+        raise HTTPException(status_code=503, detail={
+            "code": "model_unavailable",
+            "message": f"Text-to-speech failed: {str(e)}",
+        })
+
+    content_types = {"mp3": "audio/mpeg", "wav": "audio/wav", "opus": "audio/opus"}
+    media_type = content_types.get(body.response_format, "audio/mpeg")
+
+    await log_request(
+        db, user.id, "tts", "/query/text-to-speech",
+        tokens_in=len(body.text), tokens_out=0,
+        latency_ms=0, status_code=200,
+        request_id="tts-0",
+    )
+
+    from fastapi.responses import Response
+    return Response(content=audio_bytes, media_type=media_type, headers={
+        "Content-Disposition": f'attachment; filename="speech.{body.response_format}"',
     })

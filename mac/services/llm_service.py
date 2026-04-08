@@ -14,8 +14,10 @@ from mac.utils.security import generate_request_id
 # ═══════════════════════════════════════════════════════════
 
 _BUILTIN_MODELS: dict[str, dict] = {
+    # ── Chat / LLM models ────────────────────────────────
     "qwen2.5:7b": {
         "name": "Qwen2.5 7B",
+        "model_type": "chat",
         "specialty": "Fast general chat, summarisation, Q&A",
         "parameters": "7B",
         "context_length": 32768,
@@ -26,6 +28,7 @@ _BUILTIN_MODELS: dict[str, dict] = {
     },
     "qwen2.5-coder:7b": {
         "name": "Qwen2.5-Coder 7B",
+        "model_type": "chat",
         "specialty": "Code generation, debugging, explanation",
         "parameters": "7B",
         "context_length": 32768,
@@ -36,6 +39,7 @@ _BUILTIN_MODELS: dict[str, dict] = {
     },
     "deepseek-r1:14b": {
         "name": "DeepSeek-R1 14B",
+        "model_type": "chat",
         "specialty": "Maths, reasoning, step-by-step logic, deep thinking",
         "parameters": "14B",
         "context_length": 65536,
@@ -46,6 +50,7 @@ _BUILTIN_MODELS: dict[str, dict] = {
     },
     "gemma3:27b": {
         "name": "Gemma 3 27B",
+        "model_type": "chat",
         "specialty": "Highest intelligence — complex analysis, creative writing, research",
         "parameters": "27B",
         "context_length": 8192,
@@ -53,6 +58,102 @@ _BUILTIN_MODELS: dict[str, dict] = {
         "category": "intel",
         "served_name": "google/gemma-3-27b-it",
         "url_key": "vllm_intelligence_url",
+    },
+
+    # ── Speech-to-Text (Whisper) ─────────────────────────
+    "whisper-small": {
+        "name": "Faster-Whisper Small",
+        "model_type": "stt",
+        "specialty": "Fast speech-to-text, good for short clips, low VRAM (~1 GB)",
+        "parameters": "244M",
+        "context_length": 0,
+        "capabilities": ["speech"],
+        "category": "stt",
+        "served_name": "Systran/faster-whisper-small",
+        "url_key": "whisper_url",
+    },
+    "whisper-medium": {
+        "name": "Faster-Whisper Medium",
+        "model_type": "stt",
+        "specialty": "Balanced accuracy, multi-language transcription (~2 GB VRAM)",
+        "parameters": "769M",
+        "context_length": 0,
+        "capabilities": ["speech"],
+        "category": "stt",
+        "served_name": "Systran/faster-whisper-medium",
+        "url_key": "whisper_url",
+    },
+    "whisper-large-v3-turbo": {
+        "name": "Faster-Whisper Large V3 Turbo",
+        "model_type": "stt",
+        "specialty": "Best accuracy, handles accents & noisy audio (~4 GB VRAM)",
+        "parameters": "809M",
+        "context_length": 0,
+        "capabilities": ["speech"],
+        "category": "stt",
+        "served_name": "Systran/faster-whisper-large-v3-turbo",
+        "url_key": "whisper_url",
+    },
+
+    # ── Text-to-Speech ───────────────────────────────────
+    "tts-piper": {
+        "name": "Piper TTS",
+        "model_type": "tts",
+        "specialty": "Lightweight offline TTS, CPU-friendly (~50 MB RAM)",
+        "parameters": "~20M",
+        "context_length": 0,
+        "capabilities": ["tts"],
+        "category": "tts",
+        "served_name": "piper",
+        "url_key": "tts_url",
+    },
+    "tts-coqui": {
+        "name": "Coqui XTTS-v2",
+        "model_type": "tts",
+        "specialty": "High-quality voice cloning & multi-language TTS (~2 GB)",
+        "parameters": "~500M",
+        "context_length": 0,
+        "capabilities": ["tts"],
+        "category": "tts",
+        "served_name": "tts_models/multilingual/multi-dataset/xtts_v2",
+        "url_key": "tts_url",
+    },
+
+    # ── Embedding models ─────────────────────────────────
+    "nomic-embed-text": {
+        "name": "Nomic Embed Text",
+        "model_type": "embedding",
+        "specialty": "General-purpose text embeddings for RAG & search (~550 MB)",
+        "parameters": "137M",
+        "context_length": 8192,
+        "capabilities": ["embedding"],
+        "category": "embedding",
+        "served_name": "nomic-embed-text",
+        "url_key": "embedding_url",
+    },
+    "bge-small-en-v1.5": {
+        "name": "BGE Small EN",
+        "model_type": "embedding",
+        "specialty": "Tiny, fast English embeddings — perfect for low-RAM setups (~130 MB)",
+        "parameters": "33M",
+        "context_length": 512,
+        "capabilities": ["embedding"],
+        "category": "embedding",
+        "served_name": "BAAI/bge-small-en-v1.5",
+        "url_key": "embedding_url",
+    },
+
+    # ── Vision models ────────────────────────────────────
+    "moondream2": {
+        "name": "Moondream 2",
+        "model_type": "vision",
+        "specialty": "Tiny vision-language model, image captioning & Q&A (~2 GB)",
+        "parameters": "1.9B",
+        "context_length": 2048,
+        "capabilities": ["vision", "chat"],
+        "category": "vision",
+        "served_name": "vikhyatk/moondream2",
+        "url_key": "vllm_speed_url",
     },
 }
 
@@ -65,6 +166,7 @@ def _load_models() -> dict[str, dict]:
             registry: dict[str, dict] = {}
             for m in models_list:
                 mid = m.pop("id")
+                m.setdefault("model_type", "chat")
                 registry[mid] = m
             return registry
         except (json.JSONDecodeError, TypeError, KeyError):
@@ -346,12 +448,13 @@ async def text_completion(
 
 
 async def generate_embeddings(texts: list[str], model: str = "default") -> dict:
-    """Generate embeddings via vLLM /v1/embeddings."""
-    resolved = "nomic-embed-text" if model == "default" else model
+    """Generate embeddings via /v1/embeddings endpoint."""
+    resolved = settings.embedding_model if model == "default" else model
+    base_url = settings.embedding_url.strip() or settings.vllm_base_url
 
-    async with httpx.AsyncClient(timeout=settings.vllm_timeout) as client:
+    async with httpx.AsyncClient(timeout=settings.embedding_timeout) as client:
         resp = await client.post(
-            _api_url(settings.vllm_base_url, "/v1/embeddings"),
+            _api_url(base_url, "/v1/embeddings"),
             json={"model": resolved, "input": texts},
             headers=_auth_headers(),
         )
@@ -389,6 +492,7 @@ async def list_available_models() -> list[dict]:
             "id": info["served_name"],
             "name": info["name"],
             "friendly_id": model_id,
+            "model_type": info.get("model_type", "chat"),
             "specialty": info["specialty"],
             "parameters": info["parameters"],
             "category": info["category"],
@@ -466,3 +570,101 @@ async def vision_chat(
         "usage": {"prompt_tokens": usage.get("prompt_tokens", 0), "completion_tokens": usage.get("completion_tokens", 0), "total_tokens": usage.get("total_tokens", 0)},
         "_latency_ms": latency_ms,
     }
+
+
+# ═══════════════════════════════════════════════════════════
+#  HELPERS – filter by model_type
+# ═══════════════════════════════════════════════════════════
+
+def get_models_by_type(model_type: str) -> dict[str, dict]:
+    """Return all models from the registry matching a given model_type."""
+    return {k: v for k, v in DEFAULT_MODELS.items() if v.get("model_type") == model_type}
+
+
+# ═══════════════════════════════════════════════════════════
+#  SPEECH-TO-TEXT (Whisper — OpenAI-compatible /v1/audio/transcriptions)
+# ═══════════════════════════════════════════════════════════
+
+async def speech_to_text(
+    audio_bytes: bytes,
+    filename: str = "audio.wav",
+    model: str = "default",
+    language: str = "en",
+) -> dict:
+    """Transcribe audio via an OpenAI-compatible Whisper endpoint."""
+    resolved_model = settings.whisper_model if model in ("default", "auto") else model
+    whisper_base = settings.whisper_url.strip()
+    if not whisper_base:
+        raise RuntimeError("WHISPER_URL not configured")
+
+    request_id = generate_request_id("mac-stt")
+    start = time.time()
+
+    files = {"file": (filename, audio_bytes)}
+    data = {"model": resolved_model, "language": language, "response_format": "verbose_json"}
+
+    async with httpx.AsyncClient(timeout=settings.whisper_timeout) as client:
+        resp = await client.post(
+            _api_url(whisper_base, "/v1/audio/transcriptions"),
+            files=files,
+            data=data,
+            headers=_auth_headers(),
+        )
+        resp.raise_for_status()
+        result = resp.json()
+
+    latency_ms = int((time.time() - start) * 1000)
+    segments = []
+    for seg in result.get("segments", []):
+        segments.append({
+            "start": seg.get("start", 0.0),
+            "end": seg.get("end", 0.0),
+            "text": seg.get("text", ""),
+        })
+
+    return {
+        "id": request_id,
+        "model": resolved_model,
+        "text": result.get("text", ""),
+        "language": result.get("language", language),
+        "duration_seconds": result.get("duration", 0.0),
+        "segments": segments,
+        "_latency_ms": latency_ms,
+    }
+
+
+# ═══════════════════════════════════════════════════════════
+#  TEXT-TO-SPEECH (OpenAI-compatible /v1/audio/speech)
+# ═══════════════════════════════════════════════════════════
+
+async def text_to_speech(
+    text: str,
+    voice: str = "default",
+    speed: float = 1.0,
+    response_format: str = "mp3",
+    model: str = "default",
+) -> bytes:
+    """Generate audio from text via an OpenAI-compatible TTS endpoint.
+    Returns raw audio bytes in the requested format.
+    """
+    resolved_model = settings.tts_model if model in ("default", "auto") else model
+    tts_base = settings.tts_url.strip()
+    if not tts_base:
+        raise RuntimeError("TTS_URL not configured")
+
+    payload = {
+        "model": resolved_model,
+        "input": text,
+        "voice": voice,
+        "speed": speed,
+        "response_format": response_format,
+    }
+
+    async with httpx.AsyncClient(timeout=settings.tts_timeout) as client:
+        resp = await client.post(
+            _api_url(tts_base, "/v1/audio/speech"),
+            json=payload,
+            headers=_auth_headers(),
+        )
+        resp.raise_for_status()
+        return resp.content

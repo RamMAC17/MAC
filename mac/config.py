@@ -60,6 +60,21 @@ class Settings(BaseSettings):
     vllm_reasoning_url: str = "http://localhost:8003"
     vllm_intelligence_url: str = "http://localhost:8004"
 
+    # ── Whisper / STT ─────────────────────────────────────
+    whisper_url: str = "http://localhost:8005"
+    whisper_model: str = "Systran/faster-whisper-small"
+    whisper_timeout: int = 300  # audio transcription can be slow
+
+    # ── TTS ───────────────────────────────────────────────
+    tts_url: str = "http://localhost:8006"
+    tts_model: str = "default"
+    tts_timeout: int = 120
+
+    # ── Embeddings ────────────────────────────────────────
+    embedding_url: str = ""  # empty = use vllm_base_url
+    embedding_model: str = "nomic-embed-text"
+    embedding_timeout: int = 60
+
     # ── Model registry (configurable without code changes) ─
     # JSON array that *replaces* the built-in model list.
     # Each object needs: id, name, served_name, url_key, category,

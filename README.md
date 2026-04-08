@@ -78,6 +78,8 @@ That's it. Docker pulls and starts all services:
 | vLLM Speed | 8001 | Qwen2.5-7B — fast general chat |
 | vLLM Code | 8002 | Qwen2.5-Coder-7B — code generation |
 | vLLM Reasoning | 8003 | DeepSeek-R1-14B — math and logic |
+| Whisper *(optional)* | 8005 | Speech-to-text (faster-whisper) |
+| TTS *(optional)* | 8006 | Text-to-speech (Piper / OpenedAI) |
 | PostgreSQL | 5432 | Persistent database |
 | Redis | 6379 | Rate limiting and cache |
 | Qdrant | 6333 | Vector DB for RAG |
@@ -107,10 +109,15 @@ Open `http://localhost` in your browser. The PWA dashboard gives you:
 ### 5. Test the API
 
 ```bash
-# Login and get a token
+# Login with password (admin / seeded students)
+curl -X POST http://localhost/api/v1/auth/login \
+  -H "Content-Type: application/json" \
+  -d '{"roll_number": "21CS001", "password": "Student@1234"}'
+
+# OR login with roll + DOB (DDMMYYYY) — auto-creates account on first use
 curl -X POST http://localhost/api/v1/auth/verify \
   -H "Content-Type: application/json" \
-  -d '{"roll_number": "21CS001", "date_of_birth": "2003-01-15"}'
+  -d '{"roll_number": "21CS001", "dob": "10012003"}'
 
 # Chat with the AI
 curl -X POST http://localhost/api/v1/query/chat \
@@ -161,38 +168,39 @@ print(response.choices[0].message.content)
                     |           |  quota enforcement
                     +-----+-----+
                           |
-        +---------+-------+--------+---------+
-        |         |                |         |
-   +----+----+ +--+------+ +------+---+ +---+----+
-   |  vLLM   | |  vLLM   | |  vLLM    | |  vLLM  |
-   |  Speed  | |  Code   | | Reasoning| |  Intel |
-   | Qwen2.5 | | Qwen2.5 | | DeepSeek | | Gemma3 |
-   |   7B    | | Coder7B | |  R1-14B  | |  27B   |
-   |  :8001  | |  :8002  | |  :8003   | | :8004  |
-   +---------+ +---------+ +----------+ +--------+
-        |         |                |         |
-        +----+----+----+-----------+---------+
-             |         |
-        +----+----+ +--+------+
-        |  Redis  | |  Qdrant |
-        |  :6379  | |  :6333  |
-        |(ratelim)| |(RAG/vec)|
-        +---------+ +---------+
-             |
-        +----+------+     +----------+
-        | PostgreSQL |     |  SearXNG |
-        |   :5432    |     |  :8888   |
-        | (all data) |     |(web srch)|
-        +------------+     +----------+
+     +--------+-------+---+---+--------+--------+
+     |        |       |       |        |        |
+  +--+---+ +--+--+ +--+---+ +--+--+ +--+--+ +--+--+
+  | vLLM | | vLLM| | vLLM | | vLLM| |Whisp| | TTS |
+  | Speed| | Code| | Reas.| | Intel| | STT | |     |
+  |Qwen7B| |Coder| |Deep14| |Gem27B| |:8005| |:8006|
+  |:8001 | |:8002| |:8003 | |:8004 | +-----+ +-----+
+  +------+ +-----+ +------+ +------+
+        |      |       |         |
+        +---+--+-------+---------+
+            |          |
+       +----+----+ +---+-----+
+       |  Redis  | |  Qdrant |
+       |  :6379  | |  :6333  |
+       |(ratelim)| |(RAG/vec)|
+       +---------+ +---------+
+            |
+       +----+------+     +----------+
+       | PostgreSQL |     |  SearXNG |
+       |   :5432    |     |  :8888   |
+       | (all data) |     |(web srch)|
+       +------------+     +----------+
 ```
 
-Every component runs as a Docker container on the same machine. The GPU is shared among vLLM instances using memory allocation limits.
+Every component runs as a Docker container on the same machine. The GPU is shared among vLLM instances using memory allocation limits. Whisper and TTS are optional — uncomment in `docker-compose.yml` to enable.
 
 ---
 
 ## Models
 
-MAC ships with four model tiers, each optimized for a different task:
+MAC ships with **13 built-in models** across five types. All are configurable via `.env` — no code changes needed.
+
+### Chat / LLM Models
 
 | Model ID | Engine | Parameters | Specialty | GPU VRAM |
 |----------|--------|-----------|-----------|----------|
@@ -201,7 +209,39 @@ MAC ships with four model tiers, each optimized for a different task:
 | `deepseek-r1:14b` | deepseek-ai/DeepSeek-R1-Distill-Qwen-14B | 14B | Math, reasoning, step-by-step logic | ~9 GB |
 | `gemma3:27b` | google/gemma-3-27b-it | 27B | Complex analysis, creative writing, research | ~18 GB |
 
-**Default 24GB GPU setup** runs the first three models (~19GB total). Gemma-3-27B requires a 48GB+ GPU — uncomment its block in `docker-compose.yml` if you have the hardware.
+### Speech-to-Text (Whisper)
+
+| Model ID | Engine | Parameters | Specialty | GPU VRAM |
+|----------|--------|-----------|-----------|----------|
+| `whisper-small` | Systran/faster-whisper-small | 244M | Fast transcription, low VRAM | ~1 GB |
+| `whisper-medium` | Systran/faster-whisper-medium | 769M | Balanced accuracy, multi-language | ~2 GB |
+| `whisper-large-v3-turbo` | Systran/faster-whisper-large-v3-turbo | 809M | Best accuracy, accents & noisy audio | ~4 GB |
+
+### Text-to-Speech
+
+| Model ID | Engine | Parameters | Specialty | Resources |
+|----------|--------|-----------|-----------|-----------|
+| `tts-piper` | Piper TTS | ~20M | Lightweight offline TTS | CPU only, ~50 MB RAM |
+| `tts-coqui` | Coqui XTTS-v2 | ~500M | Voice cloning, multi-language | ~2 GB |
+
+### Embedding Models
+
+| Model ID | Engine | Parameters | Specialty | Resources |
+|----------|--------|-----------|-----------|-----------|
+| `nomic-embed-text` | nomic-embed-text | 137M | General-purpose RAG & search | ~550 MB |
+| `bge-small-en-v1.5` | BAAI/bge-small-en-v1.5 | 33M | Tiny, fast English embeddings | ~130 MB |
+
+### Vision Models
+
+| Model ID | Engine | Parameters | Specialty | GPU VRAM |
+|----------|--------|-----------|-----------|----------|
+| `moondream2` | vikhyatk/moondream2 | 1.9B | Image captioning & visual Q&A | ~2 GB |
+| `deepseek-r1:14b` | deepseek-ai/DeepSeek-R1-Distill-Qwen-14B | 14B | Math, reasoning, step-by-step logic | ~9 GB |
+| `gemma3:27b` | google/gemma-3-27b-it | 27B | Complex analysis, creative writing, research | ~18 GB |
+
+**Default 24GB GPU setup** runs the first three chat models (~19GB total). Gemma-3-27B requires a 48GB+ GPU — uncomment its block in `docker-compose.yml`.
+
+STT, TTS, and embedding services are optional — uncomment them in `docker-compose.yml` when you need them. They can even run on CPU-only machines.
 
 ### Why vLLM?
 
@@ -240,7 +280,9 @@ All endpoints are prefixed with `/api/v1`. Interactive docs at `/docs` (Swagger)
 
 | Method | Endpoint | Auth | Description |
 |--------|----------|------|-------------|
-| POST | `/auth/verify` | No | Login with roll number + DOB |
+| POST | `/auth/verify` | No | Login with roll number + DOB (DDMMYYYY) — auto-creates account |
+| POST | `/auth/login` | No | Login with roll number + password |
+| POST | `/auth/set-password` | JWT | Set password on first login (after verify) |
 | POST | `/auth/logout` | JWT | Revoke refresh tokens |
 | POST | `/auth/refresh` | No | Get new access token |
 | GET | `/auth/me` | JWT/Key | User profile and quota |
@@ -265,7 +307,8 @@ All endpoints are prefixed with `/api/v1`. Interactive docs at `/docs` (Swagger)
 | POST | `/query/embeddings` | Generate vector embeddings |
 | POST | `/query/rerank` | Re-rank documents by relevance |
 | POST | `/query/vision` | Vision — image analysis |
-| POST | `/query/speech-to-text` | Speech-to-text |
+| POST | `/query/speech-to-text` | Speech-to-text (Whisper) |
+| POST | `/query/text-to-speech` | Text-to-speech (audio generation) |
 
 ### Usage — `/usage` (auth required)
 
@@ -389,9 +432,17 @@ Copy `.env.example` to `.env` and adjust:
 | `VLLM_CODE_URL` | `http://localhost:8002` | Code model vLLM endpoint |
 | `VLLM_REASONING_URL` | `http://localhost:8003` | Reasoning model vLLM endpoint |
 | `VLLM_INTELLIGENCE_URL` | `http://localhost:8004` | Intelligence model vLLM endpoint |
+| `WHISPER_URL` | `http://localhost:8005` | Whisper STT endpoint |
+| `WHISPER_MODEL` | `Systran/faster-whisper-small` | Which Whisper model to use |
+| `TTS_URL` | `http://localhost:8006` | Text-to-Speech endpoint |
+| `TTS_MODEL` | `default` | TTS voice model |
+| `EMBEDDING_URL` | *(empty = use VLLM_BASE_URL)* | Separate embedding server |
+| `EMBEDDING_MODEL` | `nomic-embed-text` | Embedding model name |
 | `QDRANT_URL` | `http://localhost:6333` | Qdrant vector database |
 | `SEARXNG_URL` | `http://localhost:8888` | SearXNG search engine |
 | `JWT_SECRET_KEY` | (must change) | Secret for JWT signing |
+| `MAC_ENABLED_MODELS` | *(empty = all)* | Comma-separated model IDs to enable |
+| `MAC_MODELS_JSON` | *(empty = built-in)* | JSON array to replace entire model list |
 | `RATE_LIMIT_REQUESTS_PER_HOUR` | `100` | Max requests per hour per user |
 | `RATE_LIMIT_TOKENS_PER_DAY` | `50000` | Max tokens per day per user |
 
@@ -534,6 +585,7 @@ Edit `mac/services/llm_service.py` and add an entry to `DEFAULT_MODELS`:
 ```python
 "mymodel:size": {
     "name": "My Model Display Name",
+    "model_type": "chat",  # chat, stt, tts, embedding, vision
     "specialty": "What this model is good at",
     "parameters": "7B",
     "context_length": 8192,
@@ -543,6 +595,8 @@ Edit `mac/services/llm_service.py` and add an entry to `DEFAULT_MODELS`:
     "url_key": "vllm_mymodel_url",
 },
 ```
+
+Or **skip code edits entirely** — set `MAC_MODELS_JSON` in `.env` to a JSON array of model objects.
 
 ### Step 3: Add the Config Setting
 
@@ -559,6 +613,37 @@ Add the matching environment variable in `.env` and `docker-compose.yml`.
 ```bash
 docker compose up -d --build
 ```
+
+---
+
+## Enabling Speech-to-Text & Text-to-Speech
+
+STT and TTS are pre-configured but commented out. To enable them:
+
+### Whisper (Speech-to-Text)
+
+1. Open `docker-compose.yml` and uncomment the `whisper` service block (GPU or CPU variant)
+2. Set `WHISPER_URL` and `WHISPER_MODEL` in `.env`:
+   ```
+   WHISPER_URL=http://localhost:8005
+   WHISPER_MODEL=Systran/faster-whisper-small   # small (~1GB) | medium (~2GB) | large-v3 (~4GB)
+   ```
+3. `docker compose up -d`
+
+The endpoint `POST /api/v1/query/speech-to-text` accepts audio files (mp3, wav, ogg, m4a) up to 50 MB.
+
+### Piper / OpenedAI-Speech (Text-to-Speech)
+
+1. Uncomment the `tts` service block in `docker-compose.yml`
+2. Set `TTS_URL` in `.env`:
+   ```
+   TTS_URL=http://localhost:8006
+   ```
+3. `docker compose up -d`
+
+The endpoint `POST /api/v1/query/text-to-speech` returns audio (mp3/wav/opus).
+
+> **Low-resource machines**: Whisper Small + Piper TTS together need only ~1 GB RAM and work on CPU. No GPU required.
 
 ---
 
@@ -595,12 +680,14 @@ Leaves ~5GB free for CUDA overhead and OS.
 
 ### Run Tests
 
-```bash
+```powershell
 # Windows PowerShell:
- = "."
+$env:PYTHONPATH = "."
 pytest -v
+```
 
-# Linux/Mac:
+```bash
+# Linux / Mac:
 PYTHONPATH=. pytest -v
 ```
 

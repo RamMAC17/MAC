@@ -21,17 +21,25 @@ _START_TIME = time.time()
 async def list_models(
     status: str = Query("all", description="Filter: loaded, offline"),
     capability: str = Query("all", description="Filter: code, chat, vision, speech, math"),
+    model_type: str = Query("all", description="Filter: chat, stt, tts, embedding, vision"),
     page: int = Query(1, ge=1),
     per_page: int = Query(20, ge=1, le=100),
 ):
     """List all available models from registry."""
     models = []
     for model_id, info in DEFAULT_MODELS.items():
-        served = info.get("served_name", model_id)
+        mt = info.get("model_type", "chat")
+
+        if model_type != "all" and mt != model_type:
+            continue
+
+        if capability != "all" and capability not in info.get("capabilities", []):
+            continue
 
         models.append(ModelInfo(
             id=model_id,
             name=info["name"],
+            model_type=mt,
             specialty=info.get("specialty", ""),
             parameters=info.get("parameters", ""),
             context_length=info.get("context_length", 4096),
@@ -40,10 +48,6 @@ async def list_models(
             status="loaded",
             capabilities=info.get("capabilities", []),
         ))
-
-        if capability != "all" and capability not in info.get("capabilities", []):
-            models.pop()
-            continue
 
     total = len(models)
     start = (page - 1) * per_page
@@ -59,6 +63,7 @@ async def search_models(tag: str = Query(..., description="Capability tag: visio
             models.append(ModelInfo(
                 id=model_id,
                 name=info["name"],
+                model_type=info.get("model_type", "chat"),
                 specialty=info.get("specialty", ""),
                 parameters=info.get("parameters", ""),
                 context_length=info.get("context_length", 4096),
@@ -108,6 +113,7 @@ async def list_endpoints():
         EndpointInfo(method="POST", path="/api/v1/query/rerank", auth_required=True, description="Re-rank documents"),
         EndpointInfo(method="POST", path="/api/v1/query/vision", auth_required=True, description="Vision — image analysis"),
         EndpointInfo(method="POST", path="/api/v1/query/speech-to-text", auth_required=True, description="Speech-to-text transcription"),
+        EndpointInfo(method="POST", path="/api/v1/query/text-to-speech", auth_required=True, description="Text-to-speech audio generation"),
         EndpointInfo(method="GET", path="/api/v1/usage/me", auth_required=True, description="My usage stats"),
         EndpointInfo(method="GET", path="/api/v1/usage/me/history", auth_required=True, description="My request history"),
         EndpointInfo(method="GET", path="/api/v1/usage/me/quota", auth_required=True, description="My quota status"),
