@@ -139,34 +139,33 @@ async def api_root():
 # ── Dev seed ─────────────────────────────────────────────
 
 async def _seed_dev_user():
-    """Seed admin (Abhishek Gaur) + test students in dev mode."""
+    """Seed admin + 4 student accounts in dev mode."""
     from datetime import date
     from mac.database import async_session
     from mac.services.auth_service import get_user_by_roll, create_user, get_registry_entry
     from mac.models.user import StudentRegistry
 
     async with async_session() as db:
-        # ── 1) Super Admin: Abhishek Gaur ──────────────────
+        # ── 1) Super Admin: Prof. Abhishek Gaur ───────────
         admin_existing = await get_user_by_roll(db, "abhisek.cse@mbm.ac.in")
         if not admin_existing:
             admin = await create_user(
                 db,
                 roll_number="abhisek.cse@mbm.ac.in",
                 name="Prof. Abhishek Gaur",
-                password="MBM@admin2026",
+                password="Admin@1234",
                 department="CSE",
                 role="admin",
-                must_change_password=True,
+                must_change_password=False,
                 email="abhisek.cse@mbm.ac.in",
             )
-            print(f"  [SEED] Super Admin: {admin.roll_number} / MBM@admin2026  (must change on first login)")
+            print(f"  [SEED] Super Admin: {admin.roll_number} / Admin@1234")
             print(f"  [SEED] Admin API key: {admin.api_key}")
 
-        # ── 2) Student Registry (sample entries) ──────────
-        #    Admin also needs a registry entry for unified DOB verify flow
+        # ── 2) Student Registry + pre-created accounts ────
         sample_students = [
             ("abhisek.cse@mbm.ac.in", "Prof. Abhishek Gaur", "CSE", date(1990, 1, 1), 2020),
-            ("21CS045", "Test Student", "CSE", date(2003, 8, 15), 2021),
+            ("21CS045", "Aaryan Rajput", "CSE", date(2003, 8, 15), 2021),
             ("21CS001", "Aarav Sharma", "CSE", date(2003, 1, 10), 2021),
             ("21ME010", "Priya Patel", "ME", date(2003, 5, 22), 2021),
             ("22EC030", "Rahul Verma", "ECE", date(2004, 3, 8), 2022),
@@ -179,5 +178,25 @@ async def _seed_dev_user():
                     roll_number=roll, name=name, department=dept, dob=dob, batch_year=batch,
                 ))
 
+        # Pre-create 4 student accounts with default passwords
+        student_accounts = [
+            ("21CS045", "Aaryan Rajput",  "CSE", "Student@1234"),
+            ("21CS001", "Aarav Sharma",   "CSE", "Student@1234"),
+            ("21ME010", "Priya Patel",    "ME",  "Student@1234"),
+            ("22EC030", "Rahul Verma",    "ECE", "Student@1234"),
+        ]
+        for roll, name, dept, pwd in student_accounts:
+            if not await get_user_by_roll(db, roll):
+                u = await create_user(
+                    db,
+                    roll_number=roll,
+                    name=name,
+                    password=pwd,
+                    department=dept,
+                    role="student",
+                    must_change_password=False,
+                )
+                print(f"  [SEED] Student: {roll} / {pwd}")
+
         await db.commit()
-        print("  [SEED] Student registry seeded with sample entries")
+        print("  [SEED] All users seeded")

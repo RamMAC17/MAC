@@ -1,0 +1,27 @@
+FROM python:3.11-slim
+
+# bust cache v2
+WORKDIR /app
+
+# Install deps
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Copy application code
+COPY mac/ mac/
+COPY frontend/ frontend/
+
+# Create .env for HF Spaces config
+RUN printf 'MAC_ENV=development\n\
+MAC_PORT=7860\n\
+MAC_HOST=0.0.0.0\n\
+JWT_SECRET_KEY=hf-spaces-demo-key-change-in-prod\n\
+MAC_SECRET_KEY=hf-spaces-demo-secret\n\
+MAC_CORS_ORIGINS=["*"]\n\
+VLLM_BASE_URL=https://router.huggingface.co\n\
+REDIS_URL=redis://localhost:6379/0\n' > .env
+
+EXPOSE 7860
+
+# DATABASE_URL and VLLM_API_KEY are injected as Space Secrets at runtime
+CMD ["sh", "-c", "echo \"VLLM_API_KEY=${VLLM_API_KEY}\" >> .env && if [ -n \"$DATABASE_URL\" ]; then echo \"DATABASE_URL=${DATABASE_URL}\" >> .env; else echo 'DATABASE_URL=sqlite+aiosqlite:///./mac.db' >> .env; fi && uvicorn mac.main:app --host 0.0.0.0 --port 7860"]

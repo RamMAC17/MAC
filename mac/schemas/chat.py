@@ -9,7 +9,8 @@ from datetime import datetime
 
 class ChatMessage(BaseModel):
     role: str = Field(..., pattern="^(system|user|assistant)$")
-    content: str = Field(..., max_length=32000)
+    content: Optional[str] = Field(default=None, max_length=32000)
+    reasoning_content: Optional[str] = Field(default=None, max_length=64000)
 
 
 class ChatRequest(BaseModel):

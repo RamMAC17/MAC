@@ -1,38 +1,40 @@
-<p align="center">
+﻿<p align="center">
   <img src="logo.png" alt="MAC — MBM AI Cloud" width="200">
 </p>
 
 <h1 align="center">MAC — MBM AI Cloud</h1>
 
 <p align="center">
-  Self-hosted AI inference platform. Run open-source LLMs on your own hardware<br>and expose them as an OpenAI-compatible API.
+  Self-hosted AI inference platform. Run open-source LLMs on your own GPU<br>and expose them as an OpenAI-compatible API for your entire college.
 </p>
 
 <p align="center">
   <img src="https://img.shields.io/badge/python-3.11+-3776AB?style=flat-square&logo=python&logoColor=white" alt="Python 3.11+">
   <img src="https://img.shields.io/badge/FastAPI-0.115-009688?style=flat-square&logo=fastapi&logoColor=white" alt="FastAPI">
-  <img src="https://img.shields.io/badge/SQLAlchemy-2.0-D71F00?style=flat-square&logo=sqlalchemy&logoColor=white" alt="SQLAlchemy">
+  <img src="https://img.shields.io/badge/vLLM-GPU_Inference-FF6F00?style=flat-square" alt="vLLM">
   <img src="https://img.shields.io/badge/Docker-Compose-2496ED?style=flat-square&logo=docker&logoColor=white" alt="Docker">
   <img src="https://img.shields.io/badge/License-MIT-yellow?style=flat-square" alt="MIT License">
 </p>
 
 ---
 
-Any PC with a GPU (or even CPU) can become an AI cloud node. Students, developers, and teams can use familiar tools -- OpenAI SDK, curl, or the built-in PWA -- to access models locally.
+One PC with a GPU becomes an AI cloud for the entire college. Students, developers, and faculty get personal API keys and can use the OpenAI SDK, curl, or the built-in PWA dashboard to access powerful language models — all running locally, with zero cloud costs.
 
 ## Table of Contents
 
 - [Quick Start](#quick-start)
 - [Architecture](#architecture)
-- [API Reference](#api-reference)
+- [Models](#models)
 - [Smart Routing](#smart-routing)
+- [API Reference](#api-reference)
 - [Rate Limiting](#rate-limiting)
 - [Configuration](#configuration)
 - [Docker Deployment](#docker-deployment)
-- [Adding Models](#adding-models)
+- [Manual Setup (No Docker)](#manual-setup-no-docker)
+- [Adding or Changing Models](#adding-or-changing-models)
+- [GPU Memory Planning](#gpu-memory-planning)
 - [Development](#development)
 - [Tech Stack](#tech-stack)
-- [Project Phases](#project-phases)
 - [License](#license)
 
 ---
@@ -43,60 +45,75 @@ Any PC with a GPU (or even CPU) can become an AI cloud node. Students, developer
 
 | Tool | Version | Purpose |
 |------|---------|---------|
-| Python | 3.11+ | API server |
-| Ollama | Latest | Runs AI models locally |
-| Git | Any | Clone the repo |
+| **NVIDIA GPU** | 24GB+ VRAM (RTX 3090/4090/A5000/A6000) | Runs AI models |
+| **NVIDIA Driver** | 535+ | GPU access |
+| **Docker** | 24+ | Container runtime |
+| **Docker Compose** | v2+ | Multi-service orchestration |
+| **NVIDIA Container Toolkit** | Latest | GPU access inside containers |
 
-Optional (for production): Docker, PostgreSQL, Redis, Nginx, Qdrant, SearXNG.
+> **Windows users**: Install Docker Desktop with WSL2 backend, then install NVIDIA Container Toolkit inside WSL2.
 
-### 1. Install Ollama and Pull a Model
-
-```bash
-# Install Ollama — https://ollama.ai
-# Then pull a model:
-ollama pull qwen2.5-coder:7b    # 4.4 GB — code generation
-ollama pull qwen2.5:14b          # 8.9 GB — general chat
-ollama pull deepseek-r1:8b       # 4.9 GB — math/reasoning
-ollama pull llava:7b              # 4.7 GB — vision / image analysis
-```
-
-### 2. Clone and Setup
+### 1. Clone and Configure
 
 ```bash
 git clone https://github.com/23f2003700/mac.git
 cd mac
 
-python -m venv venv
-# Windows:
-venv\Scripts\activate
-# Linux/Mac:
-source venv/bin/activate
-
-pip install -r requirements.txt
-
 cp .env.example .env
+# Edit .env — change JWT_SECRET_KEY and MAC_SECRET_KEY to random strings
 ```
 
-### 3. Run
+### 2. Start Everything
 
 ```bash
-# Make sure Ollama is running (in another terminal):
-ollama serve
-
-# Start MAC:
-uvicorn mac.main:app --reload --host 0.0.0.0 --port 8000
+docker compose up -d
 ```
 
-Open `http://localhost:8000/docs` for the full interactive API documentation.
+That's it. Docker pulls and starts all services:
 
-### 4. Test It
+| Service | Port | What it does |
+|---------|------|-------------|
+| **Nginx** | **80** | Frontend dashboard + API reverse proxy |
+| MAC API | 8000 | FastAPI backend (auth, routing, tracking) |
+| vLLM Speed | 8001 | Qwen2.5-7B — fast general chat |
+| vLLM Code | 8002 | Qwen2.5-Coder-7B — code generation |
+| vLLM Reasoning | 8003 | DeepSeek-R1-14B — math and logic |
+| PostgreSQL | 5432 | Persistent database |
+| Redis | 6379 | Rate limiting and cache |
+| Qdrant | 6333 | Vector DB for RAG |
+| SearXNG | 8888 | Self-hosted web search |
+
+First startup takes 10-15 minutes as vLLM downloads models (~15GB total). Subsequent starts are instant (models are cached).
+
+### 3. Open the Dashboard
+
+Open `http://localhost` in your browser. The PWA dashboard gives you:
+
+- Login with roll number + password
+- Chat with AI models (auto or manual model selection)
+- Usage statistics, activity heatmap, model distribution charts
+- Admin panel for managing users, quotas, and API keys
+
+### 4. Default Accounts
+
+| Role | Email / Roll | Password |
+|------|-------------|----------|
+| **Admin** | `abhisek.cse@mbm.ac.in` | `Admin@1234` |
+| Student | `21CS045` | `Student@1234` |
+| Student | `21CS001` | `Student@1234` |
+| Student | `21ME010` | `Student@1234` |
+| Student | `22EC030` | `Student@1234` |
+
+### 5. Test the API
 
 ```bash
-curl -X POST http://localhost:8000/api/v1/auth/verify \
+# Login and get a token
+curl -X POST http://localhost/api/v1/auth/verify \
   -H "Content-Type: application/json" \
   -d '{"roll_number": "21CS001", "date_of_birth": "2003-01-15"}'
 
-curl -X POST http://localhost:8000/api/v1/query/chat \
+# Chat with the AI
+curl -X POST http://localhost/api/v1/query/chat \
   -H "Authorization: Bearer YOUR_ACCESS_TOKEN" \
   -H "Content-Type: application/json" \
   -d '{
@@ -111,8 +128,8 @@ curl -X POST http://localhost:8000/api/v1/query/chat \
 from openai import OpenAI
 
 client = OpenAI(
-    base_url="http://localhost:8000/api/v1/query",
-    api_key="YOUR_API_KEY"
+    base_url="http://localhost/api/v1/query",
+    api_key="YOUR_API_KEY"   # Get from /keys/generate
 )
 
 response = client.chat.completions.create(
@@ -127,73 +144,109 @@ print(response.choices[0].message.content)
 ## Architecture
 
 ```
-                         Clients
-          (OpenAI SDK / curl / PWA / Mobile)
+          Students / Faculty / Any Device on Campus Network
+           (OpenAI SDK / curl / PWA Dashboard / Mobile)
                            |
-                           v
+                     Port 80 (HTTP)
+                           |
                     +-----------+
-                    |   Nginx   |  Reverse proxy, SSL
+                    |   Nginx   |  Serves frontend (PWA)
+                    |           |  Reverse-proxies /api -> MAC
                     +-----+-----+
                           |
-                          v
                     +-----------+
-                    |  MAC API  |  FastAPI (auth, smart routing,
-                    |  (Python) |  guardrails, usage tracking)
+                    |  MAC API  |  FastAPI (Python)
+                    |           |  Auth, smart routing,
+                    |  :8000    |  guardrails, usage tracking,
+                    |           |  quota enforcement
                     +-----+-----+
                           |
-        +--------+--------+--------+--------+
-        v        v        v        v        v
-    +--------+ +------+ +------+ +------+ +--------+
-    | Ollama | | Redis| |Qdrant| |SearX | |LiteLLM |
-    | (LLMs) | |(cache| |(vec- | |  NG  | |(proxy) |
-    | GPU/CPU| | rate)| |tor DB| |(web) | |        |
-    +--------+ +------+ +------+ +------+ +--------+
-        |
-    +---+-----+
-    v         v
- +--------+ +--------+
- |Postgres| | SQLite |
- | (prod) | |  (dev) |
- +--------+ +--------+
+        +---------+-------+--------+---------+
+        |         |                |         |
+   +----+----+ +--+------+ +------+---+ +---+----+
+   |  vLLM   | |  vLLM   | |  vLLM    | |  vLLM  |
+   |  Speed  | |  Code   | | Reasoning| |  Intel |
+   | Qwen2.5 | | Qwen2.5 | | DeepSeek | | Gemma3 |
+   |   7B    | | Coder7B | |  R1-14B  | |  27B   |
+   |  :8001  | |  :8002  | |  :8003   | | :8004  |
+   +---------+ +---------+ +----------+ +--------+
+        |         |                |         |
+        +----+----+----+-----------+---------+
+             |         |
+        +----+----+ +--+------+
+        |  Redis  | |  Qdrant |
+        |  :6379  | |  :6333  |
+        |(ratelim)| |(RAG/vec)|
+        +---------+ +---------+
+             |
+        +----+------+     +----------+
+        | PostgreSQL |     |  SearXNG |
+        |   :5432    |     |  :8888   |
+        | (all data) |     |(web srch)|
+        +------------+     +----------+
 ```
 
-### Scaling to Multiple PCs
+Every component runs as a Docker container on the same machine. The GPU is shared among vLLM instances using memory allocation limits.
 
-Each PC runs Ollama independently. To add a new node:
+---
 
-1. Install Ollama on the new PC
-2. Pull the models you want on that PC
-3. Register it via `POST /api/v1/integration/workers`
-4. MAC routes requests across all available nodes using smart routing rules
+## Models
 
-```
-PC-1 (Your PC)          PC-2 (Lab Server)       PC-3 (Faculty PC)
-+-- MAC API             +-- Ollama               +-- Ollama
-+-- Ollama              |   +-- qwen2.5:14b      |   +-- deepseek-r1:8b
-|   +-- qwen2.5-coder   |   +-- llava:7b         |   +-- whisper-large-v3
-+-- PostgreSQL          |                        |
-+-- Redis               +-- (model server only)  +-- (model server only)
-+-- Qdrant (RAG)
-+-- SearXNG (search)
-```
+MAC ships with four model tiers, each optimized for a different task:
+
+| Model ID | Engine | Parameters | Specialty | GPU VRAM |
+|----------|--------|-----------|-----------|----------|
+| `qwen2.5:7b` | Qwen/Qwen2.5-7B-Instruct | 7B | Fast general chat, Q&A, summarization | ~5 GB |
+| `qwen2.5-coder:7b` | Qwen/Qwen2.5-Coder-7B-Instruct | 7B | Code generation, debugging, explanation | ~5 GB |
+| `deepseek-r1:14b` | deepseek-ai/DeepSeek-R1-Distill-Qwen-14B | 14B | Math, reasoning, step-by-step logic | ~9 GB |
+| `gemma3:27b` | google/gemma-3-27b-it | 27B | Complex analysis, creative writing, research | ~18 GB |
+
+**Default 24GB GPU setup** runs the first three models (~19GB total). Gemma-3-27B requires a 48GB+ GPU — uncomment its block in `docker-compose.yml` if you have the hardware.
+
+### Why vLLM?
+
+vLLM is the industry-standard serving engine for LLMs. Compared to other options:
+
+- **Continuous batching** — handles many concurrent users without queuing
+- **PagedAttention** — up to 24x better memory efficiency than naive attention
+- **OpenAI-compatible API** — drop-in replacement, works with any OpenAI SDK
+- **GPU memory control** — `--gpu-memory-utilization` lets multiple models share one GPU
+- **High throughput** — optimized CUDA kernels for maximum tokens/second
+
+This makes it ideal for a college server where 20+ students might be using the API simultaneously.
+
+---
+
+## Smart Routing
+
+When `model` is set to `"auto"`, MAC analyzes the prompt and picks the best model:
+
+| Detected Content | Routed To | Why |
+|-----------------|-----------|-----|
+| Code keywords (python, function, debug, algorithm...) | `qwen2.5-coder:7b` | Specialized for code |
+| Math keywords (equation, integral, prove, calculus...) | `deepseek-r1:14b` | Chain-of-thought reasoning |
+| Complex analysis (explain, research, essay, compare...) | `gemma3:27b` | Highest intelligence |
+| General questions | `qwen2.5:7b` | Fastest response |
+
+Students don't need to think about which model to use — `"auto"` handles it. Power users can still specify a model ID directly.
 
 ---
 
 ## API Reference
 
-All endpoints are prefixed with `/api/v1`. Full interactive docs at `/docs` (Swagger) and `/redoc`.
+All endpoints are prefixed with `/api/v1`. Interactive docs at `/docs` (Swagger) and `/redoc`.
 
-### Authentication -- `/auth`
+### Authentication — `/auth`
 
 | Method | Endpoint | Auth | Description |
 |--------|----------|------|-------------|
-| POST | `/auth/verify` | No | Verify with roll number + DOB |
+| POST | `/auth/verify` | No | Login with roll number + DOB |
 | POST | `/auth/logout` | JWT | Revoke refresh tokens |
 | POST | `/auth/refresh` | No | Get new access token |
 | GET | `/auth/me` | JWT/Key | User profile and quota |
 | POST | `/auth/change-password` | JWT | Change password |
 
-### Explore -- `/explore` (public)
+### Explore — `/explore` (public)
 
 | Method | Endpoint | Description |
 |--------|----------|-------------|
@@ -203,7 +256,7 @@ All endpoints are prefixed with `/api/v1`. Full interactive docs at `/docs` (Swa
 | GET | `/explore/endpoints` | List all API endpoints |
 | GET | `/explore/health` | Platform health and uptime |
 
-### Query -- `/query` (auth required)
+### Query — `/query` (auth required)
 
 | Method | Endpoint | Description |
 |--------|----------|-------------|
@@ -211,10 +264,10 @@ All endpoints are prefixed with `/api/v1`. Full interactive docs at `/docs` (Swa
 | POST | `/query/completions` | Text completion |
 | POST | `/query/embeddings` | Generate vector embeddings |
 | POST | `/query/rerank` | Re-rank documents by relevance |
-| POST | `/query/vision` | Vision -- image analysis (LLaVA) |
-| POST | `/query/speech-to-text` | Speech-to-text (Whisper) |
+| POST | `/query/vision` | Vision — image analysis |
+| POST | `/query/speech-to-text` | Speech-to-text |
 
-### Usage -- `/usage` (auth required)
+### Usage — `/usage` (auth required)
 
 | Method | Endpoint | Description |
 |--------|----------|-------------|
@@ -224,19 +277,19 @@ All endpoints are prefixed with `/api/v1`. Full interactive docs at `/docs` (Swa
 | GET | `/usage/admin/all` | All users (admin) |
 | GET | `/usage/admin/models` | Per-model stats (admin) |
 
-### Model Management -- `/models`
+### Model Management — `/models`
 
 | Method | Endpoint | Auth | Description |
 |--------|----------|------|-------------|
 | GET | `/models` | JWT | List models with status |
 | GET | `/models/{id}` | JWT | Model details and health |
-| POST | `/models/{id}/load` | Admin | Load model into GPU |
-| POST | `/models/{id}/unload` | Admin | Unload model from GPU |
+| POST | `/models/{id}/load` | Admin | Warm up a model |
+| POST | `/models/{id}/unload` | Admin | Unload model |
 | GET | `/models/{id}/health` | JWT | Model health metrics |
 | POST | `/models/download` | Admin | Download a new model |
 | GET | `/models/download/{task_id}` | Admin | Download progress |
 
-### Integration -- `/integration`
+### Integration — `/integration`
 
 | Method | Endpoint | Auth | Description |
 |--------|----------|------|-------------|
@@ -247,7 +300,7 @@ All endpoints are prefixed with `/api/v1`. Full interactive docs at `/docs` (Swa
 | POST | `/integration/workers/{id}/drain` | Admin | Drain a worker node |
 | GET | `/integration/queue` | JWT | Queue status |
 
-### API Keys -- `/keys`
+### API Keys — `/keys`
 
 | Method | Endpoint | Auth | Description |
 |--------|----------|------|-------------|
@@ -258,7 +311,7 @@ All endpoints are prefixed with `/api/v1`. Full interactive docs at `/docs` (Swa
 | GET | `/keys/admin/all` | Admin | All API keys |
 | POST | `/keys/admin/revoke` | Admin | Revoke a user's key |
 
-### Quota Management -- `/quota`
+### Quota Management — `/quota`
 
 | Method | Endpoint | Auth | Description |
 |--------|----------|------|-------------|
@@ -267,7 +320,7 @@ All endpoints are prefixed with `/api/v1`. Full interactive docs at `/docs` (Swa
 | PUT | `/quota/admin/user/{roll}` | Admin | Override user quota |
 | GET | `/quota/admin/exceeded` | Admin | Users exceeding quotas |
 
-### Guardrails -- `/guardrails`
+### Guardrails — `/guardrails`
 
 | Method | Endpoint | Auth | Description |
 |--------|----------|------|-------------|
@@ -276,7 +329,7 @@ All endpoints are prefixed with `/api/v1`. Full interactive docs at `/docs` (Swa
 | GET | `/guardrails/rules` | Admin | List guardrail rules |
 | PUT | `/guardrails/rules` | Admin | Update guardrail rules |
 
-### RAG (Knowledge Base) -- `/rag`
+### RAG (Knowledge Base) — `/rag`
 
 | Method | Endpoint | Auth | Description |
 |--------|----------|------|-------------|
@@ -289,7 +342,7 @@ All endpoints are prefixed with `/api/v1`. Full interactive docs at `/docs` (Swa
 | POST | `/rag/collections` | Admin | Create document collection |
 | GET | `/rag/collections` | JWT | List collections |
 
-### Search -- `/search`
+### Search — `/search`
 
 | Method | Endpoint | Auth | Description |
 |--------|----------|------|-------------|
@@ -297,21 +350,6 @@ All endpoints are prefixed with `/api/v1`. Full interactive docs at `/docs` (Swa
 | POST | `/search/wikipedia` | JWT | Wikipedia search |
 | POST | `/search/grounded` | JWT | Search + LLM grounded answer |
 | GET | `/search/cache` | JWT | Search cache stats |
-
----
-
-## Smart Routing
-
-When `model` is set to `"auto"`, MAC automatically selects the best model based on prompt content:
-
-| Keywords in Prompt | Routed To |
-|----|-----|
-| code, python, function, debug, algorithm | `qwen2.5-coder:7b` |
-| math, equation, integral, prove, calculus | `deepseek-r1:8b` |
-| General questions | `qwen2.5:14b` |
-| Image attached via `/query/vision` | `llava:7b` |
-
-Customize routing rules via `PUT /api/v1/integration/routing-rules`.
 
 ---
 
@@ -346,54 +384,210 @@ Copy `.env.example` to `.env` and adjust:
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `DATABASE_URL` | `sqlite+aiosqlite:///./mac.db` | Database connection string |
-| `OLLAMA_BASE_URL` | `http://localhost:11434` | Ollama API endpoint |
+| `DATABASE_URL` | `postgresql+asyncpg://mac:mac_password@localhost:5432/mac_db` | PostgreSQL connection |
+| `VLLM_SPEED_URL` | `http://localhost:8001` | Speed model vLLM endpoint |
+| `VLLM_CODE_URL` | `http://localhost:8002` | Code model vLLM endpoint |
+| `VLLM_REASONING_URL` | `http://localhost:8003` | Reasoning model vLLM endpoint |
+| `VLLM_INTELLIGENCE_URL` | `http://localhost:8004` | Intelligence model vLLM endpoint |
 | `QDRANT_URL` | `http://localhost:6333` | Qdrant vector database |
 | `SEARXNG_URL` | `http://localhost:8888` | SearXNG search engine |
 | `JWT_SECRET_KEY` | (must change) | Secret for JWT signing |
 | `RATE_LIMIT_REQUESTS_PER_HOUR` | `100` | Max requests per hour per user |
 | `RATE_LIMIT_TOKENS_PER_DAY` | `50000` | Max tokens per day per user |
 
-For production, use PostgreSQL and set strong secrets:
+For production, generate strong secrets:
 
 ```bash
-DATABASE_URL=postgresql+asyncpg://mac:strongpassword@localhost:5432/mac_db
-JWT_SECRET_KEY=$(openssl rand -hex 32)
-MAC_SECRET_KEY=$(openssl rand -hex 32)
+JWT_SECRET_KEY=
+MAC_SECRET_KEY=
 ```
+
+> **Note:** When running via Docker Compose, service URLs use container names (e.g., `http://vllm-speed:8001`). The compose file sets these automatically via environment variables.
 
 ---
 
 ## Docker Deployment
 
+### Start
+
 ```bash
-docker compose up -d
-docker compose logs -f mac
-docker compose down
+docker compose up -d                # Start all services
+docker compose logs -f mac          # Watch API logs
+docker compose logs -f vllm-speed   # Watch speed model logs
 ```
 
-| Service | Port | Purpose |
-|---------|------|---------|
-| MAC API | 8000 | Main API server |
-| PostgreSQL | 5432 | Relational database |
-| Redis | 6379 | Caching and rate limiting |
-| Nginx | 80 | Reverse proxy |
-| Qdrant | 6333 | Vector DB for RAG |
-| SearXNG | 8888 | Self-hosted web search |
-| LiteLLM | 4000 | Model proxy (optional) |
+### Stop
+
+```bash
+docker compose down                 # Stop all services (data preserved in volumes)
+```
+
+### Check Health
+
+```bash
+docker compose ps                   # Service status
+curl http://localhost/api/v1/explore/health   # API health
+curl http://localhost:8001/v1/models          # vLLM speed model
+curl http://localhost:8002/v1/models          # vLLM code model
+curl http://localhost:8003/v1/models          # vLLM reasoning model
+```
+
+### Reset Everything
+
+```bash
+docker compose down -v              # Stop and delete all data (volumes)
+docker compose up -d                # Fresh start
+```
 
 ---
 
-## Adding Models
+## Manual Setup (No Docker)
+
+For development or when Docker isn't available:
+
+### 1. Install vLLM
 
 ```bash
-ollama pull llama3:8b
-ollama pull mistral:7b
-ollama pull phi3:mini
-ollama pull codestral:latest
+pip install vllm
 ```
 
-Pulled models appear automatically in `/explore/models`. To add a model to the curated registry with descriptions and capabilities, edit `mac/services/llm_service.py`.
+### 2. Start vLLM Instances (each in a separate terminal)
+
+```bash
+# Terminal 1 — Speed model
+vllm serve Qwen/Qwen2.5-7B-Instruct --port 8001 --gpu-memory-utilization 0.22 --max-model-len 8192
+
+# Terminal 2 — Code model
+vllm serve Qwen/Qwen2.5-Coder-7B-Instruct --port 8002 --gpu-memory-utilization 0.22 --max-model-len 8192
+
+# Terminal 3 — Reasoning model
+vllm serve deepseek-ai/DeepSeek-R1-Distill-Qwen-14B --port 8003 --gpu-memory-utilization 0.35 --max-model-len 8192
+```
+
+### 3. Install PostgreSQL and Redis
+
+```bash
+# Ubuntu / Debian
+sudo apt install postgresql redis-server
+sudo systemctl start postgresql redis
+
+# Create the MAC database
+sudo -u postgres createuser mac
+sudo -u postgres createdb mac_db -O mac
+sudo -u postgres psql -c "ALTER USER mac PASSWORD 'mac_password';"
+```
+
+### 4. Start MAC API
+
+```bash
+python -m venv venv
+source venv/bin/activate   # or venv\Scripts\activate on Windows
+pip install -r requirements.txt
+
+cp .env.example .env
+# Edit .env with your settings
+
+uvicorn mac.main:app --host 0.0.0.0 --port 8000 --reload
+```
+
+---
+
+## Adding or Changing Models
+
+### Step 1: Add the vLLM Service
+
+Edit `docker-compose.yml` and add a new vLLM service block:
+
+```yaml
+vllm-mymodel:
+  image: vllm/vllm-openai:latest
+  container_name: mac-vllm-mymodel
+  ports:
+    - "8005:8005"
+  environment:
+    - HF_HOME=/root/.cache/huggingface
+  volumes:
+    - hf-cache:/root/.cache/huggingface
+  command: >
+    --model TheOrg/TheModel-Name
+    --port 8005
+    --gpu-memory-utilization 0.20
+    --max-model-len 8192
+    --dtype auto
+    --trust-remote-code
+  deploy:
+    resources:
+      reservations:
+        devices:
+          - driver: nvidia
+            count: 1
+            capabilities: [gpu]
+  restart: unless-stopped
+  networks:
+    - mac-net
+```
+
+### Step 2: Register in the Backend
+
+Edit `mac/services/llm_service.py` and add an entry to `DEFAULT_MODELS`:
+
+```python
+"mymodel:size": {
+    "name": "My Model Display Name",
+    "specialty": "What this model is good at",
+    "parameters": "7B",
+    "context_length": 8192,
+    "capabilities": ["chat", "completion"],
+    "category": "speed",
+    "served_name": "TheOrg/TheModel-Name",
+    "url_key": "vllm_mymodel_url",
+},
+```
+
+### Step 3: Add the Config Setting
+
+Edit `mac/config.py` and add:
+
+```python
+vllm_mymodel_url: str = "http://localhost:8005"
+```
+
+Add the matching environment variable in `.env` and `docker-compose.yml`.
+
+### Step 4: Restart
+
+```bash
+docker compose up -d --build
+```
+
+---
+
+## GPU Memory Planning
+
+vLLM lets you split GPU memory across multiple models using `--gpu-memory-utilization`:
+
+### 24GB GPU (RTX 3090 / RTX 4090)
+
+| Model | Allocation | VRAM Used |
+|-------|-----------|-----------|
+| Qwen2.5-7B (speed) | 0.22 | ~5.3 GB |
+| Qwen2.5-Coder-7B (code) | 0.22 | ~5.3 GB |
+| DeepSeek-R1-14B (reasoning) | 0.35 | ~8.4 GB |
+| **Total** | **0.79** | **~19 GB / 24 GB** |
+
+Leaves ~5GB free for CUDA overhead and OS.
+
+### 48GB GPU (RTX A6000 / 2x RTX 3090)
+
+| Model | Allocation | VRAM Used |
+|-------|-----------|-----------|
+| Qwen2.5-7B (speed) | 0.12 | ~5.8 GB |
+| Qwen2.5-Coder-7B (code) | 0.12 | ~5.8 GB |
+| DeepSeek-R1-14B (reasoning) | 0.20 | ~9.6 GB |
+| Gemma-3-27B (intelligence) | 0.45 | ~21.6 GB |
+| **Total** | **0.89** | **~42.8 GB / 48 GB** |
+
+> **Tip:** Adjust `--gpu-memory-utilization` values in `docker-compose.yml` to match your GPU. Total should not exceed 0.90 to avoid OOM errors.
 
 ---
 
@@ -403,7 +597,7 @@ Pulled models appear automatically in `/explore/models`. To add a model to the c
 
 ```bash
 # Windows PowerShell:
-$env:PYTHONPATH = "."
+ = "."
 pytest -v
 
 # Linux/Mac:
@@ -414,33 +608,37 @@ PYTHONPATH=. pytest -v
 
 ```
 mac/
-  main.py                   FastAPI app entry point
-  config.py                 Settings from .env
-  database.py               SQLAlchemy async engine
+  main.py                   FastAPI app entry point, DB init, seed users
+  config.py                 Settings loaded from .env
+  database.py               SQLAlchemy async engine + session
   models/
     user.py                 User, RefreshToken, UsageLog
     guardrail.py            GuardrailRule
     quota.py                QuotaOverride
     rag.py                  RAGCollection, RAGDocument
   schemas/                  Pydantic request/response schemas
-  routers/                  API endpoint handlers (one per phase)
+  routers/                  11 API route modules
   services/
-    auth_service.py         Authentication logic
-    llm_service.py          LLM proxy + smart routing
-    usage_service.py        Usage tracking
-    model_service.py        Model load/unload/download
-    guardrail_service.py    Content filtering
-    rag_service.py          Document chunking, vector search
-    search_service.py       Web search, grounded answers
-  middleware/               Auth and rate limiting
-  utils/                    JWT, password hashing, helpers
+    llm_service.py          LLM proxy, smart routing, vLLM integration
+    auth_service.py         Authentication and JWT logic
+    usage_service.py        Per-user usage tracking
+    model_service.py        Model health checks and management
+    guardrail_service.py    Content moderation and filtering
+    rag_service.py          Document chunking, vector search (Qdrant)
+    search_service.py       Web search, grounded answers (SearXNG)
+  middleware/               Auth middleware, rate limiter
+  utils/                    JWT helpers, password hashing, request IDs
 frontend/
   index.html                PWA shell
-  app.js                    Client-side application
-  style.css                 Styles
+  app.js                    Full dashboard app (charts, heatmap, admin)
+  style.css                 Responsive styles
   manifest.json             PWA manifest
-  sw.js                     Service worker
-tests/                      Pytest test suite (81 tests)
+  sw.js                     Service worker for offline support
+nginx/
+  nginx.conf                Reverse proxy config
+tests/                      Pytest test suite
+docker-compose.yml          Full-stack orchestration
+Dockerfile                  MAC API container build
 ```
 
 ---
@@ -449,34 +647,18 @@ tests/                      Pytest test suite (81 tests)
 
 | Layer | Technology | Purpose |
 |-------|-----------|---------|
-| API | FastAPI 0.115 | Async Python API framework with auto-docs |
-| ORM | SQLAlchemy 2.0 (async) | Async database ORM |
-| DB (dev) | SQLite + aiosqlite | Zero-config local development |
-| DB (prod) | PostgreSQL 16 | Production relational database |
-| Cache | Redis 7 | In-memory caching and rate limiting |
-| LLM Runtime | Ollama | Local LLM inference (GPU/CPU) |
-| Vector DB | Qdrant | Self-hosted vector database for RAG |
+| **LLM Runtime** | **vLLM** | GPU inference with continuous batching |
+| API | FastAPI 0.115 | Async Python API with auto-generated docs |
+| ORM | SQLAlchemy 2.0 (async) | Database models and queries |
+| Database | PostgreSQL 16 | Persistent data (users, usage, quotas) |
+| Cache | Redis 7 | In-memory rate limiting and caching |
+| Vector DB | Qdrant | Document embeddings for RAG |
 | Search | SearXNG | Self-hosted meta search engine |
 | Auth | JWT + API Keys | Stateless authentication |
-| Proxy | Nginx | Reverse proxy and TLS termination |
-| Container | Docker Compose | Multi-service orchestration |
-| Migrations | Alembic | Database schema migrations |
-
----
-
-## Project Phases
-
-| Phase | Name | Status |
-|-------|------|--------|
-| 0 | Foundation (auth, explore, health) | Complete |
-| 1 | Core API (chat, embeddings, vision, STT) | Complete |
-| 2 | Model Management (load/unload/download) | Complete |
-| 3 | Multi-PC Integration (routing, workers) | Complete |
-| 4 | Usage Control (API keys, quotas) | Complete |
-| 5 | Web Interface (PWA) | Complete |
-| 6 | Guardrails (content filtering) | Complete |
-| 7 | RAG (knowledge base, vector search) | Complete |
-| 8 | Search (web, Wikipedia, grounded) | Complete |
+| Proxy | Nginx | Reverse proxy, static file serving |
+| Frontend | Vanilla JS PWA | Dashboard with Chart.js visualizations |
+| Container | Docker Compose | Full-stack orchestration with GPU support |
+| Migrations | Alembic | Database schema versioning |
 
 ---
 

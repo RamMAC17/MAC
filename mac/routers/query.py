@@ -213,7 +213,7 @@ async def rerank(
 async def vision(
     image: UploadFile = File(..., description="Image file (jpg, png, webp)"),
     prompt: str = Form(default="Describe this image in detail."),
-    model: str = Form(default="llava:7b"),
+    model: str = Form(default="qwen2.5:7b"),
     user: User = Depends(check_rate_limit),
     db: AsyncSession = Depends(get_db),
 ):

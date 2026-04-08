@@ -1,5 +1,6 @@
 /* ═══════════════════════════════════════════════════════════
-   MAC — MBM AI Cloud  ·  PWA Frontend  v2
+   MAC — MBM AI Cloud  ·  PWA Frontend  v3
+   Premium Dashboard Edition
    ═══════════════════════════════════════════════════════════ */
 
 // ── API helper ────────────────────────────────────────────
@@ -48,12 +49,21 @@ function bindEyeToggles(root) {
 
 // ── Router ────────────────────────────────────────────────
 function navigate(page) {
+  if (state.user && state.user.must_change_password && page !== 'set-password' && page !== 'login') {
+    page = 'set-password';
+  }
   state.page = page;
   window.history.pushState({}, '', page === 'login' ? '/' : `#${page}`);
   render();
 }
 
 window.addEventListener('popstate', () => {
+  if (state.user && state.user.must_change_password) {
+    window.history.pushState({}, '', '#set-password');
+    state.page = 'set-password';
+    render();
+    return;
+  }
   const hash = location.hash.slice(1);
   state.page = hash || (state.token ? 'dashboard' : 'login');
   render();
@@ -67,7 +77,9 @@ async function init() {
       const u = await apiJson('/auth/me');
       state.user = u;
       if (u.must_change_password) {
-        state.page = 'set-password';
+        state.token = null; state.user = null;
+        localStorage.removeItem('mac_token');
+        state.page = 'login';
       } else {
         state.page = location.hash.slice(1) || 'dashboard';
       }
@@ -79,8 +91,13 @@ async function init() {
 function render() {
   const app = document.getElementById('app');
   if (!state.token || state.page === 'login') { app.innerHTML = authPage(); bindAuth(); return; }
+  if (state.user && state.user.must_change_password) {
+    state.page = 'set-password';
+    window.history.replaceState({}, '', '#set-password');
+    app.innerHTML = setPasswordPage(); bindSetPassword(); bindEyeToggles();
+    return;
+  }
   if (state.page === 'set-password') { app.innerHTML = setPasswordPage(); bindSetPassword(); bindEyeToggles(); return; }
-  // App shell
   app.innerHTML = shell();
   bindShell();
   if (state.page === 'dashboard') renderDashboard();
@@ -97,30 +114,58 @@ function logout() {
 }
 
 /* ═══════════════════════════════════════════════════════════
-   SINGLE AUTH PAGE — Registration Number + DOB
+   AUTH PAGE — Login (username+password) / First-time (roll+DOB)
    ═══════════════════════════════════════════════════════════ */
+let authMode = 'login';
+
 function authPage() {
+  if (authMode === 'verify') {
+    return `
+    <div class="auth-page">
+      <div class="auth-card">
+        <div class="logo"><span class="glitch" data-text="MAC">MAC</span></div>
+        <div class="subtitle">MBM AI Cloud · First-Time Verification</div>
+        <p style="font-size:.85rem;color:var(--muted);margin-bottom:24px">
+          First time here? Verify your college registration number and date of birth.
+        </p>
+        <div class="error" id="auth-error"></div>
+        <form id="auth-form">
+          <div class="field">
+            <label>Registration Number</label>
+            <input type="text" id="auth-roll" placeholder="e.g. 21CS045" required autocomplete="username">
+          </div>
+          <div class="field">
+            <label>Date of Birth (DDMMYYYY)</label>
+            <input type="text" id="auth-dob" placeholder="e.g. 15082003" required maxlength="8" inputmode="numeric" autocomplete="bday">
+          </div>
+          <button type="submit" class="btn btn-primary">Verify & Continue</button>
+        </form>
+        <p style="text-align:center;margin-top:20px">
+          <a href="#" id="switch-to-login" class="auth-toggle">Already have a password? <span class="link-word">Sign In</span></a>
+        </p>
+      </div>
+    </div>`;
+  }
   return `
-  <div class="bg-mac">MAC</div>
   <div class="auth-page">
     <div class="auth-card">
       <div class="logo"><span class="glitch" data-text="MAC">MAC</span></div>
       <div class="subtitle">MBM AI Cloud · Self-Hosted Inference</div>
       <p style="font-size:.85rem;color:var(--muted);margin-bottom:24px">
-        Enter your college registration number and date of birth to continue.
+        Sign in with your username and password.
       </p>
       <div class="error" id="auth-error"></div>
       <form id="auth-form">
         <div class="field">
-          <label>Registration Number</label>
+          <label>Username</label>
           <input type="text" id="auth-roll" placeholder="e.g. 21CS045" required autocomplete="username">
         </div>
-        <div class="field">
-          <label>Date of Birth (DDMMYYYY)</label>
-          <input type="text" id="auth-dob" placeholder="e.g. 15082003" required maxlength="8" inputmode="numeric" autocomplete="bday">
-        </div>
-        <button type="submit" class="btn btn-primary">Verify & Continue</button>
+        ${pwField('auth-pw', 'Password', 'Enter your password')}
+        <button type="submit" class="btn btn-primary">Sign In</button>
       </form>
+      <p style="text-align:center;margin-top:20px">
+        <a href="#" id="switch-to-verify" class="auth-toggle">First time? <span class="link-word">Verify with DOB</span></a>
+      </p>
     </div>
   </div>`;
 }
@@ -128,27 +173,48 @@ function authPage() {
 function bindAuth() {
   const form = document.getElementById('auth-form');
   if (!form) return;
+  bindEyeToggles();
+  const switchToVerify = document.getElementById('switch-to-verify');
+  const switchToLogin = document.getElementById('switch-to-login');
+  if (switchToVerify) switchToVerify.onclick = (e) => { e.preventDefault(); authMode = 'verify'; render(); };
+  if (switchToLogin) switchToLogin.onclick = (e) => { e.preventDefault(); authMode = 'login'; render(); };
+
   form.onsubmit = async (e) => {
     e.preventDefault();
     const err = document.getElementById('auth-error');
     err.textContent = '';
     const roll = document.getElementById('auth-roll').value.trim();
-    const dob = document.getElementById('auth-dob').value.trim();
-    if (!roll || !dob) { err.textContent = 'Both fields are required'; return; }
-    if (!/^\d{8}$/.test(dob)) { err.textContent = 'DOB must be 8 digits (DDMMYYYY)'; return; }
-    try {
-      const r = await fetch(`${API}/auth/verify`, {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ roll_number: roll, dob }),
-      });
-      if (!r.ok) { const d = await r.json(); err.textContent = d.detail?.message || 'Verification failed'; return; }
-      const data = await r.json();
-      state.token = data.access_token;
-      state.user = data.user;
-      localStorage.setItem('mac_token', data.access_token);
-      if (data.must_change_password) navigate('set-password');
-      else navigate('dashboard');
-    } catch (ex) { err.textContent = 'Connection error'; }
+
+    if (authMode === 'verify') {
+      const dob = document.getElementById('auth-dob').value.trim();
+      if (!roll || !dob) { err.textContent = 'Both fields are required'; return; }
+      if (!/^\d{8}$/.test(dob)) { err.textContent = 'DOB must be 8 digits (DDMMYYYY)'; return; }
+      try {
+        const r = await fetch(`${API}/auth/verify`, {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ roll_number: roll, dob }),
+        });
+        if (!r.ok) { const d = await r.json(); err.textContent = d.detail?.message || 'Verification failed'; return; }
+        const data = await r.json();
+        state.token = data.access_token; state.user = data.user;
+        localStorage.setItem('mac_token', data.access_token);
+        if (data.must_change_password) navigate('set-password'); else navigate('dashboard');
+      } catch (ex) { err.textContent = 'Connection error'; }
+    } else {
+      const pw = document.getElementById('auth-pw').value;
+      if (!roll || !pw) { err.textContent = 'Both fields are required'; return; }
+      try {
+        const r = await fetch(`${API}/auth/login`, {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ roll_number: roll, password: pw }),
+        });
+        if (!r.ok) { const d = await r.json(); err.textContent = d.detail?.message || 'Invalid username or password'; return; }
+        const data = await r.json();
+        state.token = data.access_token; state.user = data.user;
+        localStorage.setItem('mac_token', data.access_token);
+        if (data.must_change_password) navigate('set-password'); else navigate('dashboard');
+      } catch (ex) { err.textContent = 'Connection error'; }
+    }
   };
 }
 
@@ -158,7 +224,6 @@ function bindAuth() {
 function setPasswordPage() {
   const u = state.user || {};
   return `
-  <div class="bg-mac">MAC</div>
   <div class="auth-page">
     <div class="auth-card">
       <div class="logo"><span class="glitch" data-text="MAC">MAC</span></div>
@@ -192,7 +257,6 @@ function bindSetPassword() {
         body: JSON.stringify({ new_password: pw, confirm_password: conf }),
       });
       if (!r.ok) { const d = await r.json(); err.textContent = d.detail?.message || 'Failed'; return; }
-      // Refresh user profile
       state.user = await apiJson('/auth/me');
       navigate('dashboard');
     } catch (ex) { err.textContent = ex.message; }
@@ -207,59 +271,87 @@ function shell() {
   const isAdmin = u.role === 'admin';
   const pages = { dashboard: 'Dashboard', chat: 'Chat', settings: 'Settings', admin: 'Admin' };
   return `
-  <div class="bg-mac">MAC</div>
   <div class="shell" id="shell">
-    <nav class="sidebar">
+    <div class="sidebar-overlay" id="sidebar-overlay"></div>
+    <nav class="sidebar" id="sidebar">
       <div class="sidebar-header">
         <div class="brand"><span class="glitch" data-text="MAC">MAC</span></div>
       </div>
       <div class="sidebar-nav">
         <a href="#dashboard" data-page="dashboard" class="${state.page==='dashboard'?'active':''}">
-          <span>◈</span> Dashboard
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg>
+          Dashboard
         </a>
         <a href="#chat" data-page="chat" class="${state.page==='chat'?'active':''}">
-          <span>◉</span> Chat
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
+          Chat
         </a>
         <a href="#settings" data-page="settings" class="${state.page==='settings'?'active':''}">
-          <span>⚡</span> Settings
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+          Settings
         </a>
         ${isAdmin ? `<a href="#admin" data-page="admin" class="${state.page==='admin'?'active':''}">
-          <span>⚙</span> Admin Panel
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+          Admin Panel
         </a>` : ''}
       </div>
       <div class="sidebar-user">
-        <div class="name">${esc(u.name || '')}</div>
-        <div>${esc(u.roll_number || '')} · <span class="badge badge-${u.role}">${esc(u.role || '')}</span></div>
-        <button class="btn btn-sm btn-outline" style="margin-top:8px;width:100%" onclick="logout()">Sign Out</button>
+        <div class="user-avatar">${(u.name || '?')[0].toUpperCase()}</div>
+        <div>
+          <div class="name">${esc(u.name || '')}</div>
+          <div style="font-size:.75rem">${esc(u.roll_number || '')} · <span class="badge badge-${u.role}">${esc(u.role || '')}</span></div>
+        </div>
       </div>
+      <button class="btn btn-sm btn-outline sidebar-logout" onclick="logout()">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/></svg>
+        Sign Out
+      </button>
     </nav>
     <div class="main-content">
       <div class="topbar">
-        <button class="btn btn-sm menu-btn" onclick="document.getElementById('shell').classList.toggle('sidebar-open')">☰</button>
+        <button class="btn btn-sm menu-btn" id="menu-toggle">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="18" x2="21" y2="18"/></svg>
+        </button>
         <h1>${pages[state.page] || 'Dashboard'}</h1>
-        <div style="font-size:.75rem;color:var(--muted)">vLLM Backend</div>
+        <div class="topbar-right">
+          <span class="status-dot"></span>
+          <span style="font-size:.75rem;color:var(--muted)">Online</span>
+        </div>
       </div>
       <div class="page" id="page-content"></div>
     </div>
   </div>`;
 }
+
 function bindShell() {
   document.querySelectorAll('.sidebar-nav a').forEach(a => {
-    a.onclick = (e) => { e.preventDefault(); navigate(a.dataset.page); };
+    a.onclick = (e) => { e.preventDefault(); closeSidebar(); navigate(a.dataset.page); };
   });
+  const toggle = document.getElementById('menu-toggle');
+  const overlay = document.getElementById('sidebar-overlay');
+  if (toggle) toggle.onclick = () => {
+    document.getElementById('shell').classList.toggle('sidebar-open');
+  };
+  if (overlay) overlay.onclick = closeSidebar;
+}
+
+function closeSidebar() {
+  const shell = document.getElementById('shell');
+  if (shell) shell.classList.remove('sidebar-open');
 }
 
 /* ═══════════════════════════════════════════════════════════
-   DASHBOARD
+   USER DASHBOARD — Premium Analytics
    ═══════════════════════════════════════════════════════════ */
 async function renderDashboard() {
   const el = document.getElementById('page-content');
-  el.innerHTML = '<div style="text-align:center;padding:40px;color:var(--muted)">Loading...</div>';
+  el.innerHTML = '<div class="loading-state"><div class="spinner"></div><span>Loading dashboard...</span></div>';
   try {
-    const [me, quota, history] = await Promise.all([
+    const [me, quota, history, keyStats] = await Promise.all([
       apiJson('/auth/me'),
       apiJson('/usage/me/quota'),
-      apiJson('/usage/me/history?per_page=10'),
+      apiJson('/usage/me/history?per_page=50'),
+      apiJson('/keys/my-key/stats').catch(() => null),
     ]);
     state.user = me;
     const q = quota;
@@ -267,112 +359,304 @@ async function renderDashboard() {
     const tokensLimit = q.limits?.daily_tokens || 50000;
     const reqsUsed = q.current?.requests_this_hour || 0;
     const reqsLimit = q.limits?.requests_per_hour || 100;
-    const tokenPct = Math.round((tokensUsed / tokensLimit) * 100);
-    const reqPct = Math.round((reqsUsed / reqsLimit) * 100);
+    const tokenPct = Math.min(100, Math.round((tokensUsed / tokensLimit) * 100));
+    const reqPct = Math.min(100, Math.round((reqsUsed / reqsLimit) * 100));
+    const reqs = history.requests || [];
+
+    // Build activity heatmap data from history
+    const heatmapData = buildHeatmapData(reqs);
+    // Build model distribution
+    const modelDist = {};
+    reqs.forEach(r => { modelDist[r.model] = (modelDist[r.model] || 0) + 1; });
+    // Build hourly distribution
+    const hourlyDist = new Array(24).fill(0);
+    reqs.forEach(r => { const h = new Date(r.created_at).getHours(); hourlyDist[h]++; });
 
     el.innerHTML = `
-      <div class="stats-grid">
-        <div class="stat-card">
-          <div class="label">Welcome</div>
-          <div class="value" style="font-size:1.1rem;font-family:inherit">${esc(me.name)}</div>
-          <div class="sub"><span class="badge badge-${me.role}">${me.role}</span> · ${esc(me.department)}</div>
+      <div class="dash-greeting">
+        <div>
+          <h2>Welcome back, ${esc(me.name.split(' ')[0])}</h2>
+          <p>${esc(me.department)} · ${esc(me.role)} · Joined ${new Date(me.created_at).toLocaleDateString('en-IN', {month:'short',year:'numeric'})}</p>
         </div>
-        <div class="stat-card">
-          <div class="label">Tokens Today</div>
-          <div class="value">${fmtNum(tokensUsed)}</div>
-          <div class="sub">of ${fmtNum(tokensLimit)} daily limit</div>
-        </div>
-        <div class="stat-card">
-          <div class="label">Requests / hr</div>
-          <div class="value">${reqsUsed}</div>
-          <div class="sub">of ${reqsLimit} hourly limit</div>
-        </div>
-        <div class="stat-card">
-          <div class="label">Chat Sessions</div>
-          <div class="value">${getSessions().length}</div>
-          <div class="sub">saved locally</div>
+        <div class="dash-greeting-api">
+          <span class="label">API Key</span>
+          <code class="api-key-mini">${esc(me.api_key ? me.api_key.slice(0,8) + '...' + me.api_key.slice(-4) : 'N/A')}</code>
         </div>
       </div>
 
-      <div class="charts-grid">
-        <div class="chart-card">
-          <h3>Daily Token Usage</h3>
-          <div class="chart-wrap">
-            <canvas id="chart-tokens"></canvas>
-            <div class="chart-center-text">
-              <div class="pct">${tokenPct}%</div>
-              <div class="lbl">used</div>
-            </div>
+      <div class="stats-grid stats-4">
+        <div class="stat-card">
+          <div class="stat-icon"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg></div>
+          <div class="stat-body">
+            <div class="label">Tokens Today</div>
+            <div class="value">${fmtNum(tokensUsed)}</div>
+            <div class="stat-bar"><div class="stat-bar-fill ${tokenPct > 80 ? 'warn' : ''}" style="width:${tokenPct}%"></div></div>
+            <div class="sub">${tokenPct}% of ${fmtNum(tokensLimit)}</div>
           </div>
         </div>
-        <div class="chart-card">
-          <h3>Hourly Request Usage</h3>
-          <div class="chart-wrap">
-            <canvas id="chart-reqs"></canvas>
-            <div class="chart-center-text">
-              <div class="pct">${reqPct}%</div>
-              <div class="lbl">used</div>
-            </div>
+        <div class="stat-card">
+          <div class="stat-icon"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg></div>
+          <div class="stat-body">
+            <div class="label">Requests / Hour</div>
+            <div class="value">${reqsUsed}</div>
+            <div class="stat-bar"><div class="stat-bar-fill ${reqPct > 80 ? 'warn' : ''}" style="width:${reqPct}%"></div></div>
+            <div class="sub">${reqPct}% of ${reqsLimit}</div>
           </div>
         </div>
-        <div class="chart-card">
-          <h3>Available Models</h3>
-          <div id="models-list" style="font-size:.85rem;color:var(--muted)">Loading...</div>
+        <div class="stat-card">
+          <div class="stat-icon"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/></svg></div>
+          <div class="stat-body">
+            <div class="label">This Week</div>
+            <div class="value">${fmtNum(keyStats?.tokens_this_week || 0)}</div>
+            <div class="sub">tokens consumed</div>
+          </div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-icon"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg></div>
+          <div class="stat-body">
+            <div class="label">Chat Sessions</div>
+            <div class="value">${getSessions().length}</div>
+            <div class="sub">saved locally</div>
+          </div>
         </div>
       </div>
 
-      <div class="chart-card" style="margin-bottom:24px">
-        <h3>Recent Activity</h3>
-        ${history.requests && history.requests.length > 0 ? `
-          <table class="history-table">
-            <thead><tr><th>Model</th><th>Endpoint</th><th>Tokens</th><th>Latency</th><th>Time</th></tr></thead>
+      <div class="charts-row">
+        <div class="chart-card flex-2">
+          <div class="chart-header">
+            <h3>Activity Heatmap</h3>
+            <span class="chart-sub">Your usage pattern over recent days</span>
+          </div>
+          <div class="heatmap-container" id="heatmap-container"></div>
+        </div>
+        <div class="chart-card flex-1">
+          <div class="chart-header">
+            <h3>Model Usage</h3>
+            <span class="chart-sub">Distribution by model</span>
+          </div>
+          <div class="chart-wrap-sm" style="position:relative">
+            <canvas id="chart-models"></canvas>
+            ${Object.keys(modelDist).length === 0 ? '<div class="chart-empty"><svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="#bbb" stroke-width="1.5"><circle cx="12" cy="12" r="10"/><path d="M12 2a10 10 0 0 1 10 10"/><line x1="12" y1="12" x2="12" y2="8"/><line x1="12" y1="12" x2="16" y2="12"/></svg><p>No model usage yet</p><span>Start a chat to see distribution</span></div>' : ''}
+          </div>
+          <div id="model-legend" class="chart-legend"></div>
+        </div>
+      </div>
+
+      <div class="charts-row">
+        <div class="chart-card flex-1">
+          <div class="chart-header">
+            <h3>Hourly Activity</h3>
+            <span class="chart-sub">When you use MAC most</span>
+          </div>
+          <div style="height:200px;position:relative">
+            <canvas id="chart-hourly"></canvas>
+            ${hourlyDist.every(v => v === 0) ? '<div class="chart-empty"><svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="#bbb" stroke-width="1.5"><rect x="3" y="3" width="18" height="18" rx="2"/><line x1="3" y1="9" x2="21" y2="9"/><line x1="9" y1="3" x2="9" y2="21"/></svg><p>No activity recorded yet</p><span>Use the chat — your hourly pattern will appear here</span></div>' : ''}
+          </div>
+        </div>
+        <div class="chart-card flex-1">
+          <div class="chart-header">
+            <h3>Quota Overview</h3>
+          </div>
+          <div class="quota-rings">
+            <div class="ring-wrap">
+              <canvas id="chart-tokens" width="120" height="120"></canvas>
+              <div class="ring-label"><span class="pct">${tokenPct}%</span><span class="lbl">Tokens</span></div>
+            </div>
+            <div class="ring-wrap">
+              <canvas id="chart-reqs" width="120" height="120"></canvas>
+              <div class="ring-label"><span class="pct">${reqPct}%</span><span class="lbl">Requests</span></div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="chart-card">
+        <div class="chart-header">
+          <h3>Recent Activity</h3>
+          <span class="chart-sub">${reqs.length} recent requests</span>
+        </div>
+        ${reqs.length > 0 ? `
+          <div class="table-responsive">
+          <table class="data-table">
+            <thead><tr><th>Model</th><th>Endpoint</th><th>Tokens</th><th>Latency</th><th>Status</th><th>Time</th></tr></thead>
             <tbody>
-              ${history.requests.map(r => `
+              ${reqs.slice(0,15).map(r => `
                 <tr>
-                  <td style="font-family:monospace;font-size:.8rem">${esc(r.model)}</td>
-                  <td>${esc(r.endpoint)}</td>
-                  <td>${r.tokens_in + r.tokens_out}</td>
+                  <td><span class="model-tag">${esc(shortModel(r.model))}</span></td>
+                  <td class="mono">${esc(r.endpoint)}</td>
+                  <td>${fmtNum(r.tokens_in + r.tokens_out)}</td>
                   <td>${r.latency_ms}ms</td>
-                  <td style="color:var(--muted)">${timeAgo(r.created_at)}</td>
+                  <td>${r.status_code < 400 ? '<span class="dot-success"></span> OK' : '<span class="dot-error"></span> ' + r.status_code}</td>
+                  <td class="muted">${timeAgo(r.created_at)}</td>
                 </tr>
               `).join('')}
             </tbody>
           </table>
-        ` : '<p style="color:var(--muted);font-size:.85rem;padding:12px">No activity yet. Start a chat!</p>'}
+          </div>
+        ` : '<div class="empty-state"><p>No activity yet. Start a chat or make an API call!</p></div>'}
+      </div>
+
+      <div class="chart-card">
+        <div class="chart-header">
+          <h3>Available Models</h3>
+        </div>
+        <div id="models-grid" class="models-grid"><div class="muted">Loading...</div></div>
       </div>
     `;
-    makeDonut('chart-tokens', tokensUsed, tokensLimit);
-    makeDonut('chart-reqs', reqsUsed, reqsLimit);
 
+    // Render heatmap
+    renderHeatmap('heatmap-container', heatmapData);
+
+    // Donut charts
+    makeDonut('chart-tokens', tokensUsed, tokensLimit, '#000');
+    makeDonut('chart-reqs', reqsUsed, reqsLimit, '#000');
+
+    // Model distribution chart
+    const modelLabels = Object.keys(modelDist);
+    const modelValues = Object.values(modelDist);
+    const modelColors = ['#111', '#555', '#999', '#bbb', '#ddd'];
+    if (modelLabels.length > 0) {
+      new Chart(document.getElementById('chart-models'), {
+        type: 'doughnut',
+        data: { labels: modelLabels.map(shortModel), datasets: [{ data: modelValues, backgroundColor: modelColors.slice(0, modelLabels.length), borderWidth: 2, borderColor: '#fff', cutout: '68%', hoverOffset: 8 }] },
+        options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { display: false }, tooltip: { backgroundColor: '#000', titleColor: '#fff', bodyColor: '#fff', cornerRadius: 8, padding: 10 } } },
+      });
+      document.getElementById('model-legend').innerHTML = modelLabels.map((m, i) =>
+        `<div class="legend-item"><span class="legend-dot" style="background:${modelColors[i % modelColors.length]}"></span>${esc(shortModel(m))}<span class="muted" style="margin-left:auto">${modelValues[i]}</span></div>`
+      ).join('');
+    }
+
+    // Hourly area chart with gradient
+    const hourlyCtx = document.getElementById('chart-hourly').getContext('2d');
+    const hourlyGrad = hourlyCtx.createLinearGradient(0, 0, 0, 180);
+    hourlyGrad.addColorStop(0, 'rgba(0,0,0,0.18)');
+    hourlyGrad.addColorStop(1, 'rgba(0,0,0,0.01)');
+    new Chart(hourlyCtx.canvas, {
+      type: 'line',
+      data: {
+        labels: Array.from({length:24}, (_, i) => i + 'h'),
+        datasets: [{
+          data: hourlyDist,
+          fill: true,
+          backgroundColor: hourlyGrad,
+          borderColor: '#000',
+          borderWidth: 2,
+          pointBackgroundColor: '#000',
+          pointBorderColor: '#fff',
+          pointBorderWidth: 2,
+          pointRadius: hourlyDist.map(v => v > 0 ? 4 : 0),
+          pointHoverRadius: 6,
+          tension: 0.4,
+        }],
+      },
+      options: {
+        responsive: true, maintainAspectRatio: false,
+        plugins: {
+          legend: { display: false },
+          tooltip: {
+            backgroundColor: '#000', titleColor: '#fff', bodyColor: '#fff',
+            cornerRadius: 8, padding: 10,
+            callbacks: { label: (ctx) => ctx.raw + ' request' + (ctx.raw !== 1 ? 's' : '') }
+          }
+        },
+        scales: {
+          y: { display: true, beginAtZero: true, grid: { color: 'rgba(0,0,0,0.04)' }, ticks: { font: { size: 10 }, stepSize: 1, precision: 0 } },
+          x: { grid: { display: false }, ticks: { font: { size: 9 }, maxRotation: 0 } }
+        },
+        interaction: { intersect: false, mode: 'index' },
+      },
+    });
+
+    // Models grid
     try {
       const m = await apiJson('/models');
       const list = m.models || [];
-      document.getElementById('models-list').innerHTML = list.map(md =>
-        `<div style="display:flex;justify-content:space-between;padding:6px 0;border-bottom:1px solid var(--border)">
-          <span style="font-family:monospace">${esc(md.id || md.name)}</span>
-          <span class="badge" style="background:${md.status==='loaded'?'#000':'#eee'};color:${md.status==='loaded'?'#fff':'#999'}">${md.status}</span>
-        </div>`
-      ).join('') || '<p>No models configured</p>';
-    } catch { document.getElementById('models-list').textContent = 'Could not load models'; }
+      document.getElementById('models-grid').innerHTML = list.map(md => `
+        <div class="model-card">
+          <div class="model-name">${esc(md.id || md.name)}</div>
+          <div class="model-status ${md.status === 'loaded' ? 'online' : 'offline'}">${md.status === 'loaded' ? '<span class="status-dot on"></span> Online' : '<span class="status-dot off"></span> Offline'}</div>
+        </div>
+      `).join('') || '<p class="muted">No models configured</p>';
+    } catch { document.getElementById('models-grid').innerHTML = '<p class="muted">Could not load models</p>'; }
 
-  } catch (ex) { el.innerHTML = `<p style="color:var(--danger)">Error loading dashboard: ${esc(ex.message)}</p>`; }
-}
-
-function makeDonut(id, used, total) {
-  const canvas = document.getElementById(id);
-  if (!canvas) return;
-  new Chart(canvas, {
-    type: 'doughnut',
-    data: {
-      labels: ['Used', 'Remaining'],
-      datasets: [{ data: [used, Math.max(0, total - used)], backgroundColor: ['#000', '#eee'], borderWidth: 0, cutout: '75%' }],
-    },
-    options: { responsive: true, plugins: { legend: { display: false }, tooltip: { enabled: true } }, animation: { animateRotate: true, duration: 800 } },
-  });
+  } catch (ex) { el.innerHTML = `<div class="error-state"><p>Error: ${esc(ex.message)}</p><button class="btn btn-sm btn-outline" onclick="renderDashboard()">Retry</button></div>`; }
 }
 
 /* ═══════════════════════════════════════════════════════════
-   SETTINGS (Profile + Change Password)
+   HEATMAP — GitHub-style contribution graph
+   ═══════════════════════════════════════════════════════════ */
+function buildHeatmapData(requests) {
+  const map = {};
+  requests.forEach(r => {
+    const d = new Date(r.created_at).toISOString().slice(0, 10);
+    map[d] = (map[d] || 0) + 1;
+  });
+  return map;
+}
+
+function renderHeatmap(containerId, data) {
+  const container = document.getElementById(containerId);
+  if (!container) return;
+  const hasData = Object.values(data).some(v => v > 0);
+  const today = new Date();
+  const weeks = 26;
+  const totalCols = weeks + 1;
+  const days = weeks * 7;
+  const maxVal = Math.max(1, ...Object.values(data));
+
+  const startDate = new Date(today);
+  startDate.setDate(startDate.getDate() - days + 1);
+  startDate.setDate(startDate.getDate() - startDate.getDay()); // align to Sunday
+
+  // --- Month labels: collect which columns each month spans ---
+  const monthSpans = [];
+  let curMonth = -1, spanStart = 0;
+  for (let w = 0; w < totalCols; w++) {
+    const d = new Date(startDate); d.setDate(d.getDate() + w * 7);
+    const m = d.getMonth();
+    if (m !== curMonth) {
+      if (curMonth !== -1) monthSpans.push({ name: new Date(startDate.getTime() + spanStart * 7 * 86400000).toLocaleString('en', { month: 'short' }), start: spanStart, span: w - spanStart });
+      curMonth = m; spanStart = w;
+    }
+  }
+  monthSpans.push({ name: new Date(startDate.getTime() + spanStart * 7 * 86400000).toLocaleString('en', { month: 'short' }), start: spanStart, span: totalCols - spanStart });
+  const monthRow = monthSpans.map(m => `<span class="hm-month" style="grid-column:span ${m.span}">${m.name}</span>`).join('');
+
+  // --- Day labels (all 7) ---
+  const dayNames = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+
+  // --- Grid cells ---
+  let cells = '';
+  for (let w = 0; w < totalCols; w++) {
+    for (let d = 0; d < 7; d++) {
+      const cellDate = new Date(startDate);
+      cellDate.setDate(cellDate.getDate() + w * 7 + d);
+      const dateStr = cellDate.toISOString().slice(0, 10);
+      const count = data[dateStr] || 0;
+      const level = count === 0 ? 0 : Math.min(4, Math.ceil((count / maxVal) * 4));
+      const isFuture = cellDate > today;
+      const tip = cellDate.toLocaleDateString('en', { weekday: 'long', month: 'short', day: 'numeric', year: 'numeric' }) + ': ' + (isFuture ? 'No data yet' : count + ' request' + (count !== 1 ? 's' : ''));
+      cells += `<div class="hm-cell hm-${isFuture ? 'empty' : level}" title="${tip}"></div>`;
+    }
+  }
+
+  container.innerHTML = `
+    <div class="heatmap-months" style="grid-template-columns:repeat(${totalCols},1fr)">${monthRow}</div>
+    <div class="heatmap-body">
+      <div class="heatmap-labels">${dayNames.map(n => `<span>${n}</span>`).join('')}</div>
+      <div class="heatmap-grid" style="grid-template-columns:repeat(${totalCols},1fr)">${cells}</div>
+    </div>
+    ${!hasData ? '<div class="heatmap-empty"><svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="#bbb" stroke-width="1.5"><rect x="3" y="4" width="18" height="16" rx="2"/><line x1="3" y1="10" x2="21" y2="10"/><line x1="8" y1="4" x2="8" y2="10"/><line x1="16" y1="4" x2="16" y2="10"/></svg><p>No activity yet</p><span>Your usage will light up here as you chat</span></div>' : ''}
+    <div class="heatmap-legend">
+      <span style="font-size:.7rem;color:#888">Less</span>
+      <div class="hm-cell hm-0"></div><div class="hm-cell hm-1"></div><div class="hm-cell hm-2"></div><div class="hm-cell hm-3"></div><div class="hm-cell hm-4"></div>
+      <span style="font-size:.7rem;color:#888">More</span>
+    </div>
+  `;
+}
+
+/* ═══════════════════════════════════════════════════════════
+   SETTINGS
    ═══════════════════════════════════════════════════════════ */
 async function renderSettings() {
   const el = document.getElementById('page-content');
@@ -380,7 +664,7 @@ async function renderSettings() {
   el.innerHTML = `
     <div class="settings-cards">
       <div class="settings-card">
-        <h3>Profile Information</h3>
+        <h3><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-3px;margin-right:6px"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>Profile Information</h3>
         <div class="field"><label>Roll Number</label><input value="${esc(u.roll_number)}" disabled></div>
         <div class="field"><label>Name</label><input id="pf-name" value="${esc(u.name)}"></div>
         <div class="field"><label>Email</label><input id="pf-email" type="email" value="${esc(u.email || '')}" placeholder="Optional"></div>
@@ -390,7 +674,7 @@ async function renderSettings() {
         <button class="btn btn-primary" id="save-profile-btn" style="width:auto;padding:8px 24px">Save Profile</button>
       </div>
       <div class="settings-card">
-        <h3>Change Password</h3>
+        <h3><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-3px;margin-right:6px"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>Change Password</h3>
         ${pwField('cp-old', 'Current Password', 'Current password')}
         ${pwField('cp-new', 'New Password', 'Min 8 characters')}
         ${pwField('cp-confirm', 'Confirm New Password', 'Repeat password')}
@@ -398,10 +682,15 @@ async function renderSettings() {
         <button class="btn btn-primary" id="change-pw-btn" style="width:auto;padding:8px 24px">Update Password</button>
       </div>
       <div class="settings-card">
-        <h3>API Key</h3>
-        <p style="font-size:.85rem;color:var(--muted);margin-bottom:12px">Use this key to authenticate API requests programmatically.</p>
-        <div class="api-key" id="api-key-display">${esc(u.api_key || 'N/A')}</div>
-        <button class="btn btn-sm btn-outline" style="margin-top:12px" onclick="navigator.clipboard.writeText(document.getElementById('api-key-display').textContent)">Copy to Clipboard</button>
+        <h3><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-3px;margin-right:6px"><path d="M21 2l-2 2m-7.61 7.61a5.5 5.5 0 1 1-7.778 7.778 5.5 5.5 0 0 1 7.777-7.777zm0 0L15.5 7.5m0 0l3 3L22 7l-3-3m-3.5 3.5L19 4"/></svg>API Key</h3>
+        <p style="font-size:.85rem;color:var(--muted);margin-bottom:12px">Use this key in your projects to call MAC APIs from anywhere.</p>
+        <div class="api-key-box">
+          <code id="api-key-display">${esc(u.api_key || 'N/A')}</code>
+          <button class="btn btn-sm btn-outline copy-btn" onclick="navigator.clipboard.writeText(document.getElementById('api-key-display').textContent).then(()=>{this.textContent='Copied!';setTimeout(()=>this.textContent='Copy',1500)})">Copy</button>
+        </div>
+        <div style="margin-top:12px">
+          <button class="btn btn-sm btn-danger-outline" id="regen-my-key">Regenerate Key</button>
+        </div>
       </div>
     </div>`;
 
@@ -416,7 +705,7 @@ async function renderSettings() {
       });
       if (!r.ok) { const d = await r.json(); msg.innerHTML = `<span style="color:var(--danger)">${esc(d.detail?.message || 'Failed')}</span>`; return; }
       state.user = await apiJson('/auth/me');
-      msg.innerHTML = '<span style="color:var(--success)">Profile updated</span>';
+      msg.innerHTML = '<span style="color:var(--success)">Profile updated <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px"><polyline points="20 6 9 17 4 12"/></svg></span>';
     } catch (ex) { msg.innerHTML = `<span style="color:var(--danger)">${esc(ex.message)}</span>`; }
   };
 
@@ -435,11 +724,21 @@ async function renderSettings() {
         body: JSON.stringify({ old_password: oldPw, new_password: newPw }),
       });
       if (!r.ok) { const d = await r.json(); msg.innerHTML = `<span style="color:var(--danger)">${esc(d.detail?.message || 'Failed')}</span>`; return; }
-      msg.innerHTML = '<span style="color:var(--success)">Password changed!</span>';
+      msg.innerHTML = '<span style="color:var(--success)">Password changed! <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px"><polyline points="20 6 9 17 4 12"/></svg></span>';
       document.getElementById('cp-old').value = '';
       document.getElementById('cp-new').value = '';
       document.getElementById('cp-confirm').value = '';
     } catch (ex) { msg.innerHTML = `<span style="color:var(--danger)">${esc(ex.message)}</span>`; }
+  };
+
+  const regenBtn = document.getElementById('regen-my-key');
+  if (regenBtn) regenBtn.onclick = async () => {
+    if (!confirm('Regenerate your API key? The old key will stop working immediately.')) return;
+    try {
+      const r = await apiJson('/keys/generate', { method: 'POST' });
+      document.getElementById('api-key-display').textContent = r.api_key || r.key || 'Generated';
+      state.user = await apiJson('/auth/me');
+    } catch (ex) { alert('Failed: ' + ex.message); }
   };
 }
 
@@ -458,7 +757,7 @@ function renderChat() {
   const sessions = getSessions();
   el.innerHTML = `
     <div class="chat-layout" style="height:100%">
-      <div class="chat-sessions">
+      <div class="chat-sessions" id="chat-sidebar">
         <div class="chat-sessions-header">
           <h3>Sessions</h3>
           <button class="btn btn-sm btn-outline" id="new-chat-btn">+ New</button>
@@ -481,13 +780,15 @@ function renderChat() {
             <option value="qwen2.5-coder:7b">Qwen2.5-Coder 7B</option>
             <option value="deepseek-r1:8b">DeepSeek-R1 8B</option>
             <option value="qwen2.5:14b">Qwen2.5 14B</option>
-            <option value="llava:7b">LLaVA 7B (Vision)</option>
+            <option value="qwen2.5:7b">Qwen2.5 7B</option>
           </select>
           <span id="chat-status" style="margin-left:auto"></span>
         </div>
         <div class="chat-input-bar">
           <textarea id="chat-input" placeholder="Type a message..." rows="1"></textarea>
-          <button class="send-btn" id="send-btn">▶</button>
+          <button class="send-btn" id="send-btn">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor"><path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z"/></svg>
+          </button>
         </div>
       </div>
     </div>`;
@@ -499,7 +800,7 @@ function sessionItem(s) {
   const active = currentSession && currentSession.id === s.id;
   return `<div class="session-item ${active ? 'active' : ''}" data-id="${s.id}">
     <span>${esc(s.title || 'New Chat')}</span>
-    <span class="del" data-del="${s.id}">✕</span>
+    <span class="del" data-del="${s.id}"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></span>
   </div>`;
 }
 
@@ -589,28 +890,41 @@ async function sendMessage() {
     const reader = res.body.getReader();
     const decoder = new TextDecoder();
     let buffer = '';
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      buffer += decoder.decode(value, { stream: true });
-      const lines = buffer.split('\n');
-      buffer = lines.pop();
-      for (const line of lines) {
-        if (!line.startsWith('data: ')) continue;
-        const data = line.slice(6).trim();
-        if (data === '[DONE]') continue;
-        try {
-          const chunk = JSON.parse(data);
-          if (chunk.error) throw new Error(chunk.error.message);
-          const delta = chunk.choices?.[0]?.delta?.content || '';
-          if (delta) { fullContent += delta; assistantDiv.innerHTML = formatMd(fullContent); msgs.scrollTop = msgs.scrollHeight; }
-        } catch (parseErr) { if (parseErr.message.includes('Backend') || parseErr.message.includes('model')) throw parseErr; }
+    let streamError = null;
+    try {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split('\n');
+        buffer = lines.pop();
+        for (const line of lines) {
+          if (!line.startsWith('data: ')) continue;
+          const data = line.slice(6).trim();
+          if (data === '[DONE]') continue;
+          try {
+            const chunk = JSON.parse(data);
+            if (chunk.error) throw new Error(chunk.error.message);
+            const delta = chunk.choices?.[0]?.delta?.content || '';
+            if (delta) { fullContent += delta; assistantDiv.innerHTML = formatMd(fullContent); msgs.scrollTop = msgs.scrollHeight; }
+          } catch (parseErr) { if (parseErr.message.includes('Backend') || parseErr.message.includes('model')) throw parseErr; }
+        }
       }
+    } catch (streamErr) {
+      streamError = streamErr;
     }
-    if (!fullContent) fullContent = '(No response)';
-    currentSession.messages.push({ role: 'assistant', content: fullContent });
-    persistSession();
-    assistantDiv.innerHTML = formatMd(fullContent);
+    if (fullContent) {
+      currentSession.messages.push({ role: 'assistant', content: fullContent });
+      persistSession();
+      assistantDiv.innerHTML = formatMd(fullContent);
+    } else if (streamError) {
+      throw streamError;
+    } else {
+      fullContent = '(No response)';
+      currentSession.messages.push({ role: 'assistant', content: fullContent });
+      persistSession();
+      assistantDiv.innerHTML = formatMd(fullContent);
+    }
   } catch (err) {
     assistantDiv.innerHTML = `<span style="color:var(--danger)">Error: ${esc(err.message)}</span>`;
     currentSession.messages.push({ role: 'assistant', content: `Error: ${err.message}` });
@@ -631,46 +945,198 @@ function persistSession() {
 }
 
 /* ═══════════════════════════════════════════════════════════
-   ADMIN PANEL — Full Control
+   ADMIN PANEL — Full Control Dashboard
    ═══════════════════════════════════════════════════════════ */
-let adminTab = 'users';
+let adminTab = 'overview';
 
 async function renderAdmin() {
   const el = document.getElementById('page-content');
   if (!state.user || state.user.role !== 'admin') {
-    el.innerHTML = '<p style="color:var(--danger)">Admin access required.</p>';
+    el.innerHTML = '<div class="error-state"><p>Admin access required.</p></div>';
     return;
   }
   el.innerHTML = `
     <div class="admin-tabs" id="admin-tabs">
-      <div class="admin-tab ${adminTab==='overview'?'active':''}" data-tab="overview">Overview</div>
-      <div class="admin-tab ${adminTab==='users'?'active':''}" data-tab="users">Users</div>
-      <div class="admin-tab ${adminTab==='registry'?'active':''}" data-tab="registry">Student Registry</div>
+      <div class="admin-tab ${adminTab==='overview'?'active':''}" data-tab="overview">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 20V10"/><path d="M12 20V4"/><path d="M6 20v-6"/></svg>
+        <span>Overview</span>
+      </div>
+      <div class="admin-tab ${adminTab==='users'?'active':''}" data-tab="users">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>
+        <span>Users</span>
+      </div>
+      <div class="admin-tab ${adminTab==='keys'?'active':''}" data-tab="keys">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 2l-2 2m-7.61 7.61a5.5 5.5 0 1 1-7.778 7.778 5.5 5.5 0 0 1 7.777-7.777zm0 0L15.5 7.5m0 0l3 3L22 7l-3-3m-3.5 3.5L19 4"/></svg>
+        <span>API Keys</span>
+      </div>
+      <div class="admin-tab ${adminTab==='models'?'active':''}" data-tab="models">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="3" width="20" height="14" rx="2" ry="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg>
+        <span>Models</span>
+      </div>
+      <div class="admin-tab ${adminTab==='registry'?'active':''}" data-tab="registry">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/></svg>
+        <span>Registry</span>
+      </div>
     </div>
-    <div id="admin-content"><div style="text-align:center;padding:40px;color:var(--muted)">Loading...</div></div>
+    <div id="admin-content"><div class="loading-state"><div class="spinner"></div><span>Loading...</span></div></div>
   `;
   document.querySelectorAll('#admin-tabs .admin-tab').forEach(t => {
     t.onclick = () => { adminTab = t.dataset.tab; renderAdmin(); };
   });
   if (adminTab === 'overview') await renderAdminOverview();
   else if (adminTab === 'users') await renderAdminUsers();
+  else if (adminTab === 'keys') await renderAdminKeys();
+  else if (adminTab === 'models') await renderAdminModels();
   else if (adminTab === 'registry') await renderAdminRegistry();
 }
 
 async function renderAdminOverview() {
   const el = document.getElementById('admin-content');
   try {
-    const stats = await apiJson('/auth/admin/stats');
+    const [stats, modelStats, exceeded, allUsage] = await Promise.all([
+      apiJson('/auth/admin/stats'),
+      apiJson('/usage/admin/models').catch(() => ({ models: [] })),
+      apiJson('/quota/admin/exceeded').catch(() => ({ users: [] })),
+      apiJson('/usage/admin/all?per_page=100').catch(() => ({ users: [] })),
+    ]);
+
+    const allUsers = allUsage.users || [];
+    // Department breakdown
+    const deptMap = {};
+    allUsers.forEach(u => { deptMap[u.department] = (deptMap[u.department] || 0) + 1; });
+    // Top users by tokens
+    const topUsers = [...allUsers].sort((a, b) => (b.tokens_today || 0) - (a.tokens_today || 0)).slice(0, 5);
+    const models = modelStats.models || [];
+    const exceededUsers = exceeded.users || [];
+
     el.innerHTML = `
-      <div class="stats-grid" style="margin-top:4px">
-        <div class="stat-card"><div class="label">Total Users</div><div class="value">${stats.total_users}</div></div>
-        <div class="stat-card"><div class="label">Active Users</div><div class="value">${stats.active_users}</div></div>
-        <div class="stat-card"><div class="label">Admins</div><div class="value">${stats.admin_count}</div></div>
-        <div class="stat-card"><div class="label">Registry Entries</div><div class="value">${stats.registry_count}</div></div>
-        <div class="stat-card"><div class="label">Requests Today</div><div class="value">${fmtNum(stats.requests_today)}</div></div>
-        <div class="stat-card"><div class="label">Tokens Today</div><div class="value">${fmtNum(stats.tokens_today)}</div></div>
-      </div>`;
-  } catch (ex) { el.innerHTML = `<p style="color:var(--danger)">Error: ${esc(ex.message)}</p>`; }
+      <div class="stats-grid stats-3">
+        <div class="stat-card accent">
+          <div class="stat-icon"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg></div>
+          <div class="stat-body">
+            <div class="label">Total Users</div>
+            <div class="value">${stats.total_users}</div>
+            <div class="sub">${stats.active_users} active · ${stats.admin_count} admins</div>
+          </div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-icon"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg></div>
+          <div class="stat-body">
+            <div class="label">Requests Today</div>
+            <div class="value">${fmtNum(stats.requests_today)}</div>
+            <div class="sub">across all users</div>
+          </div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-icon"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2v4m0 12v4M4.93 4.93l2.83 2.83m8.48 8.48l2.83 2.83M2 12h4m12 0h4M4.93 19.07l2.83-2.83m8.48-8.48l2.83-2.83"/></svg></div>
+          <div class="stat-body">
+            <div class="label">Tokens Today</div>
+            <div class="value">${fmtNum(stats.tokens_today)}</div>
+            <div class="sub">total consumed</div>
+          </div>
+        </div>
+      </div>
+
+      <div class="charts-row">
+        <div class="chart-card flex-1">
+          <div class="chart-header">
+            <h3>Model Performance</h3>
+            <span class="chart-sub">Today's stats per model</span>
+          </div>
+          ${models.length > 0 ? `
+          <div class="table-responsive">
+          <table class="data-table">
+            <thead><tr><th>Model</th><th>Requests</th><th>Tokens</th><th>Avg Latency</th><th>Users</th></tr></thead>
+            <tbody>
+              ${models.map(m => `
+                <tr>
+                  <td><span class="model-tag">${esc(shortModel(m.model))}</span></td>
+                  <td>${fmtNum(m.requests_today)}</td>
+                  <td>${fmtNum(m.tokens_today)}</td>
+                  <td>${m.avg_latency_ms || 0}ms</td>
+                  <td>${m.unique_users_today || 0}</td>
+                </tr>
+              `).join('')}
+            </tbody>
+          </table>
+          </div>
+          ` : '<div class="empty-state"><p>No model usage data yet</p></div>'}
+        </div>
+        <div class="chart-card flex-1">
+          <div class="chart-header">
+            <h3>Department Distribution</h3>
+          </div>
+          <div style="height:220px"><canvas id="admin-dept-chart"></canvas></div>
+        </div>
+      </div>
+
+      <div class="charts-row">
+        <div class="chart-card flex-1">
+          <div class="chart-header">
+            <h3><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-3px;margin-right:6px"><path d="M6 9H4.5a2.5 2.5 0 0 1 0-5H6"/><path d="M18 9h1.5a2.5 2.5 0 0 0 0-5H18"/><path d="M4 22h16"/><path d="M10 14.66V17c0 .55-.47.98-.97 1.21C7.85 18.75 7 20.24 7 22"/><path d="M14 14.66V17c0 .55.47.98.97 1.21C16.15 18.75 17 20.24 17 22"/><path d="M18 2H6v7a6 6 0 0 0 12 0V2Z"/></svg> Top Users Today</h3>
+            <span class="chart-sub">By token consumption</span>
+          </div>
+          ${topUsers.length > 0 ? `
+          <div class="top-users-list">
+            ${topUsers.map((u, i) => `
+              <div class="top-user-row">
+                <span class="rank">#${i + 1}</span>
+                <div class="top-user-info">
+                  <span class="name">${esc(u.name)}</span>
+                  <span class="muted">${esc(u.roll_number)} · ${esc(u.department)}</span>
+                </div>
+                <div class="top-user-bar-wrap">
+                  <div class="top-user-bar" style="width:${Math.max(5, ((u.tokens_today || 0) / (topUsers[0].tokens_today || 1)) * 100)}%"></div>
+                </div>
+                <span class="top-user-val">${fmtNum(u.tokens_today || 0)}</span>
+              </div>
+            `).join('')}
+          </div>
+          ` : '<div class="empty-state"><p>No usage yet today</p></div>'}
+        </div>
+        <div class="chart-card flex-1">
+          <div class="chart-header">
+            <h3><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-3px;margin-right:6px"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg> Quota Exceeded</h3>
+            <span class="chart-sub">Users who hit their daily limit</span>
+          </div>
+          ${exceededUsers.length > 0 ? `
+          <div class="table-responsive">
+          <table class="data-table">
+            <thead><tr><th>User</th><th>Dept</th><th>Used</th><th>Limit</th><th>Over by</th></tr></thead>
+            <tbody>
+              ${exceededUsers.map(u => `
+                <tr>
+                  <td><strong>${esc(u.name || u.roll_number)}</strong></td>
+                  <td>${esc(u.department)}</td>
+                  <td>${fmtNum(u.tokens_used)}</td>
+                  <td>${fmtNum(u.daily_limit)}</td>
+                  <td class="danger">${fmtNum(u.exceeded_by || 0)}</td>
+                </tr>
+              `).join('')}
+            </tbody>
+          </table>
+          </div>
+          ` : '<div class="empty-state" style="padding:24px"><p><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px"><polyline points="20 6 9 17 4 12"/></svg> No one has exceeded their quota</p></div>'}
+        </div>
+      </div>
+    `;
+
+    // Department chart
+    const deptLabels = Object.keys(deptMap);
+    const deptValues = Object.values(deptMap);
+    if (deptLabels.length > 0) {
+      const deptColors = ['#000', '#333', '#666', '#999', '#bbb', '#ddd'];
+      new Chart(document.getElementById('admin-dept-chart'), {
+        type: 'bar',
+        data: {
+          labels: deptLabels,
+          datasets: [{ data: deptValues, backgroundColor: deptColors.slice(0, deptLabels.length), borderRadius: 6, barPercentage: 0.6 }],
+        },
+        options: { responsive: true, maintainAspectRatio: false, indexAxis: 'y', plugins: { legend: { display: false } }, scales: { x: { grid: { display: false } }, y: { grid: { display: false } } } },
+      });
+    }
+
+  } catch (ex) { el.innerHTML = `<div class="error-state"><p>Error: ${esc(ex.message)}</p></div>`; }
 }
 
 async function renderAdminUsers() {
@@ -680,33 +1146,35 @@ async function renderAdminUsers() {
     const users = data.users || [];
     el.innerHTML = `
       <div class="admin-header">
-        <h2>User Management (${users.length})</h2>
+        <h2>User Management <span class="badge" style="background:#eee;color:#000;font-size:.75rem;vertical-align:middle">${users.length}</span></h2>
         <button class="btn btn-sm btn-primary" id="add-user-btn" style="width:auto;padding:8px 16px">+ Add User</button>
       </div>
-      <div style="overflow-x:auto">
-      <table class="users-table">
-        <thead><tr><th>Roll No</th><th>Name</th><th>Dept</th><th>Role</th><th>Status</th><th>Pwd Reset</th><th>Joined</th><th>Actions</th></tr></thead>
+      <div class="table-responsive">
+      <table class="data-table">
+        <thead><tr><th>Roll No</th><th>Name</th><th>Dept</th><th>Role</th><th>Status</th><th>Pwd</th><th>Joined</th><th>Actions</th></tr></thead>
         <tbody>
           ${users.map(u => `
             <tr>
-              <td style="font-family:monospace;font-weight:600">${esc(u.roll_number)}</td>
+              <td class="mono bold">${esc(u.roll_number)}</td>
               <td>${esc(u.name)}</td>
               <td>${esc(u.department)}</td>
               <td><span class="badge badge-${u.role}">${u.role}</span></td>
-              <td>${u.is_active ? '<span style="color:var(--success)">● Active</span>' : '<span style="color:var(--danger)">○ Inactive</span>'}</td>
-              <td>${u.must_change_password ? '<span style="color:var(--danger)">Pending</span>' : '<span style="color:var(--muted)">Done</span>'}</td>
-              <td style="color:var(--muted);font-size:.8rem">${new Date(u.created_at).toLocaleDateString()}</td>
-              <td style="white-space:nowrap">
-                <select class="role-select" data-uid="${u.id}" style="padding:4px 6px;font-size:.78rem;border-radius:4px">
-                  <option value="student" ${u.role==='student'?'selected':''}>Student</option>
-                  <option value="faculty" ${u.role==='faculty'?'selected':''}>Faculty</option>
-                  <option value="admin" ${u.role==='admin'?'selected':''}>Admin</option>
-                </select>
-                <button class="btn btn-sm btn-outline toggle-status" data-uid="${u.id}" data-active="${u.is_active}" style="margin-left:4px">
-                  ${u.is_active ? 'Deactivate' : 'Activate'}
-                </button>
-                <button class="btn btn-sm btn-outline reset-pw" data-uid="${u.id}" style="margin-left:4px" title="Reset password">🔑</button>
-                <button class="btn btn-sm btn-outline regen-key" data-uid="${u.id}" style="margin-left:4px" title="Regenerate API key">🔄</button>
+              <td>${u.is_active ? '<span class="dot-success"></span> Active' : '<span class="dot-error"></span> Inactive'}</td>
+              <td>${u.must_change_password ? '<span style="color:var(--danger)">Pending</span>' : '<span class="muted">Set</span>'}</td>
+              <td class="muted">${new Date(u.created_at).toLocaleDateString()}</td>
+              <td>
+                <div class="action-btns">
+                  <select class="role-select" data-uid="${u.id}" title="Change role">
+                    <option value="student" ${u.role==='student'?'selected':''}>Student</option>
+                    <option value="faculty" ${u.role==='faculty'?'selected':''}>Faculty</option>
+                    <option value="admin" ${u.role==='admin'?'selected':''}>Admin</option>
+                  </select>
+                  <button class="icon-btn toggle-status" data-uid="${u.id}" data-active="${u.is_active}" title="${u.is_active ? 'Deactivate' : 'Activate'}">
+                    ${u.is_active ? '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="6" y="4" width="4" height="16"/><rect x="14" y="4" width="4" height="16"/></svg>' : '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="5 3 19 12 5 21 5 3"/></svg>'}
+                  </button>
+                  <button class="icon-btn reset-pw" data-uid="${u.id}" title="Reset password"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 2l-2 2m-7.61 7.61a5.5 5.5 0 1 1-7.778 7.778 5.5 5.5 0 0 1 7.777-7.777zm0 0L15.5 7.5m0 0l3 3L22 7l-3-3m-3.5 3.5L19 4"/></svg></button>
+                  <button class="icon-btn regen-key" data-uid="${u.id}" title="Regenerate API key"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg></button>
+                </div>
               </td>
             </tr>
           `).join('')}
@@ -715,23 +1183,15 @@ async function renderAdminUsers() {
       </div>`;
 
     el.querySelectorAll('.role-select').forEach(sel => {
-      sel.onchange = async () => {
-        try { await api(`/auth/admin/users/${sel.dataset.uid}/role`, { method: 'PUT', body: JSON.stringify({ role: sel.value }) }); renderAdmin(); } catch { alert('Failed'); }
-      };
+      sel.onchange = async () => { try { await api(`/auth/admin/users/${sel.dataset.uid}/role`, { method: 'PUT', body: JSON.stringify({ role: sel.value }) }); renderAdmin(); } catch { alert('Failed'); } };
     });
     el.querySelectorAll('.toggle-status').forEach(btn => {
-      btn.onclick = async () => {
-        try { await api(`/auth/admin/users/${btn.dataset.uid}/status`, { method: 'PUT', body: JSON.stringify({ is_active: btn.dataset.active !== 'true' }) }); renderAdmin(); } catch { alert('Failed'); }
-      };
+      btn.onclick = async () => { try { await api(`/auth/admin/users/${btn.dataset.uid}/status`, { method: 'PUT', body: JSON.stringify({ is_active: btn.dataset.active !== 'true' }) }); renderAdmin(); } catch { alert('Failed'); } };
     });
     el.querySelectorAll('.reset-pw').forEach(btn => {
       btn.onclick = async () => {
         if (!confirm('Reset this user\'s password?')) return;
-        try {
-          const r = await apiJson(`/auth/admin/users/${btn.dataset.uid}/reset-password`, { method: 'POST' });
-          alert(`Temp password: ${r.temp_password}\nUser must change on next login.`);
-          renderAdmin();
-        } catch { alert('Failed'); }
+        try { const r = await apiJson(`/auth/admin/users/${btn.dataset.uid}/reset-password`, { method: 'POST' }); alert(`Temp password: ${r.temp_password}\nUser must change on next login.`); renderAdmin(); } catch { alert('Failed'); }
       };
     });
     el.querySelectorAll('.regen-key').forEach(btn => {
@@ -741,7 +1201,77 @@ async function renderAdminUsers() {
       };
     });
     document.getElementById('add-user-btn').onclick = showAddUserModal;
-  } catch (ex) { el.innerHTML = `<p style="color:var(--danger)">Error: ${esc(ex.message)}</p>`; }
+  } catch (ex) { el.innerHTML = `<div class="error-state"><p>Error: ${esc(ex.message)}</p></div>`; }
+}
+
+async function renderAdminKeys() {
+  const el = document.getElementById('admin-content');
+  try {
+    const data = await apiJson('/keys/admin/all');
+    const keys = data.keys || [];
+    el.innerHTML = `
+      <div class="admin-header">
+        <h2>API Key Management <span class="badge" style="background:#eee;color:#000;font-size:.75rem;vertical-align:middle">${keys.length}</span></h2>
+      </div>
+      <div class="table-responsive">
+      <table class="data-table">
+        <thead><tr><th>Roll No</th><th>Name</th><th>Key Prefix</th><th>Status</th><th>Actions</th></tr></thead>
+        <tbody>
+          ${keys.map(k => `
+            <tr>
+              <td class="mono bold">${esc(k.roll_number)}</td>
+              <td>${esc(k.name)}</td>
+              <td class="mono">${esc(k.prefix || k.api_key_prefix || '---')}</td>
+              <td>${k.active !== false ? '<span class="dot-success"></span> Active' : '<span class="dot-error"></span> Revoked'}</td>
+              <td>
+                <button class="btn btn-sm btn-danger-outline revoke-key" data-roll="${esc(k.roll_number)}">Revoke</button>
+              </td>
+            </tr>
+          `).join('')}
+        </tbody>
+      </table>
+      </div>`;
+
+    el.querySelectorAll('.revoke-key').forEach(btn => {
+      btn.onclick = async () => {
+        if (!confirm(`Revoke API key for ${btn.dataset.roll}?`)) return;
+        try { await api('/keys/admin/revoke', { method: 'POST', body: JSON.stringify({ roll_number: btn.dataset.roll }) }); renderAdmin(); } catch { alert('Failed'); }
+      };
+    });
+  } catch (ex) { el.innerHTML = `<div class="error-state"><p>Error: ${esc(ex.message)}</p></div>`; }
+}
+
+async function renderAdminModels() {
+  const el = document.getElementById('admin-content');
+  try {
+    const [modelsData, modelStats] = await Promise.all([
+      apiJson('/models'),
+      apiJson('/usage/admin/models').catch(() => ({ models: [] })),
+    ]);
+    const models = modelsData.models || [];
+    const stats = modelStats.models || [];
+
+    el.innerHTML = `
+      <div class="admin-header"><h2>Model Status & Analytics</h2></div>
+      <div class="models-grid-admin">
+        ${models.map(m => {
+          const s = stats.find(st => st.model === m.id) || {};
+          return `
+          <div class="model-card-admin">
+            <div class="model-card-header">
+              <span class="model-name">${esc(m.id || m.name)}</span>
+              <span class="model-status ${m.status === 'loaded' ? 'online' : 'offline'}">${m.status === 'loaded' ? '<span class="status-dot on"></span> Online' : '<span class="status-dot off"></span> Offline'}</span>
+            </div>
+            <div class="model-stats-row">
+              <div><span class="label">Requests</span><span class="val">${fmtNum(s.requests_today || 0)}</span></div>
+              <div><span class="label">Tokens</span><span class="val">${fmtNum(s.tokens_today || 0)}</span></div>
+              <div><span class="label">Latency</span><span class="val">${s.avg_latency_ms || 0}ms</span></div>
+              <div><span class="label">Users</span><span class="val">${s.unique_users_today || 0}</span></div>
+            </div>
+          </div>`;
+        }).join('')}
+      </div>`;
+  } catch (ex) { el.innerHTML = `<div class="error-state"><p>Error: ${esc(ex.message)}</p></div>`; }
 }
 
 function showAddUserModal() {
@@ -771,10 +1301,8 @@ function showAddUserModal() {
     </div>`;
   document.body.appendChild(overlay);
   bindEyeToggles(overlay);
-
   overlay.querySelector('#nu-cancel').onclick = () => overlay.remove();
   overlay.onclick = (e) => { if (e.target === overlay) overlay.remove(); };
-
   overlay.querySelector('#nu-submit').onclick = async () => {
     const err = overlay.querySelector('#nu-error');
     err.textContent = '';
@@ -792,8 +1320,7 @@ function showAddUserModal() {
     try {
       const r = await api('/auth/admin/users', { method: 'POST', body: JSON.stringify(body) });
       if (!r.ok) { const d = await r.json(); err.textContent = d.detail?.message || 'Failed'; return; }
-      overlay.remove();
-      renderAdmin();
+      overlay.remove(); renderAdmin();
     } catch (ex) { err.textContent = ex.message; }
   };
 }
@@ -805,20 +1332,20 @@ async function renderAdminRegistry() {
     const entries = data.entries || [];
     el.innerHTML = `
       <div class="admin-header">
-        <h2>Student Registry (${entries.length})</h2>
-        <div style="display:flex;gap:8px">
-          <button class="btn btn-sm btn-outline" id="add-reg-btn" style="width:auto;padding:8px 16px">+ Add Student</button>
-          <button class="btn btn-sm btn-primary" id="bulk-reg-btn" style="width:auto;padding:8px 16px">Bulk Import</button>
+        <h2>Student Registry <span class="badge" style="background:#eee;color:#000;font-size:.75rem;vertical-align:middle">${entries.length}</span></h2>
+        <div style="display:flex;gap:8px;flex-wrap:wrap">
+          <button class="btn btn-sm btn-outline" id="add-reg-btn">+ Add Student</button>
+          <button class="btn btn-sm btn-primary" id="bulk-reg-btn">Bulk Import</button>
         </div>
       </div>
-      <p style="font-size:.85rem;color:var(--muted);margin-bottom:16px">Students must exist here before they can sign up. Their roll number + DOB are verified during registration.</p>
-      <div style="overflow-x:auto">
-      <table class="users-table">
+      <p style="font-size:.85rem;color:var(--muted);margin-bottom:16px">College database. Students verify against this to create accounts.</p>
+      <div class="table-responsive">
+      <table class="data-table">
         <thead><tr><th>Roll No</th><th>Name</th><th>Dept</th><th>DOB</th><th>Batch</th></tr></thead>
         <tbody>
           ${entries.map(e => `
             <tr>
-              <td style="font-family:monospace;font-weight:600">${esc(e.roll_number)}</td>
+              <td class="mono bold">${esc(e.roll_number)}</td>
               <td>${esc(e.name)}</td>
               <td>${esc(e.department)}</td>
               <td>${esc(e.dob)}</td>
@@ -865,8 +1392,7 @@ async function renderAdminRegistry() {
         try {
           const r = await api('/auth/admin/registry', { method: 'POST', body: JSON.stringify(body) });
           if (!r.ok) { const d = await r.json(); err.textContent = d.detail?.message || 'Failed'; return; }
-          overlay.remove();
-          renderAdmin();
+          overlay.remove(); renderAdmin();
         } catch (ex) { err.textContent = ex.message; }
       };
     };
@@ -877,8 +1403,8 @@ async function renderAdminRegistry() {
       overlay.innerHTML = `
         <div class="modal">
           <h3>Bulk Import Students</h3>
-          <p style="font-size:.85rem;color:var(--muted);margin-bottom:12px">Paste JSON array of students. Each entry: <code>{ roll_number, name, department, dob (DD-MM-YYYY), batch_year }</code></p>
-          <textarea id="bulk-json" rows="8" style="width:100%;font-family:monospace;font-size:.8rem" placeholder='[{"roll_number":"23CS001","name":"Student Name","department":"CSE","dob":"10-05-2005","batch_year":2023}]'></textarea>
+          <p style="font-size:.85rem;color:var(--muted);margin-bottom:12px">Paste JSON array. Each: <code>{ roll_number, name, department, dob, batch_year }</code></p>
+          <textarea id="bulk-json" rows="8" style="width:100%;font-family:monospace;font-size:.8rem" placeholder='[{"roll_number":"23CS001","name":"Name","department":"CSE","dob":"10-05-2005","batch_year":2023}]'></textarea>
           <div id="bulk-error" style="color:var(--danger);font-size:.85rem;min-height:20px;margin-top:8px"></div>
           <div id="bulk-result" style="font-size:.85rem;min-height:20px;margin-top:4px"></div>
           <div class="modal-actions">
@@ -903,7 +1429,44 @@ async function renderAdminRegistry() {
         } catch (ex) { err.textContent = ex.message; }
       };
     };
-  } catch (ex) { el.innerHTML = `<p style="color:var(--danger)">Error: ${esc(ex.message)}</p>`; }
+  } catch (ex) { el.innerHTML = `<div class="error-state"><p>Error: ${esc(ex.message)}</p></div>`; }
+}
+
+/* ═══════════════════════════════════════════════════════════
+   CHART HELPERS
+   ═══════════════════════════════════════════════════════════ */
+function makeDonut(id, used, total, color) {
+  const canvas = document.getElementById(id);
+  if (!canvas) return;
+  const remaining = Math.max(0, total - used);
+  new Chart(canvas, {
+    type: 'doughnut',
+    data: {
+      labels: ['Used', 'Remaining'],
+      datasets: [{ data: [used, remaining], backgroundColor: [color || '#000', '#eee'], borderWidth: 0, cutout: '75%' }],
+    },
+    options: {
+      responsive: false,
+      plugins: {
+        legend: { display: false },
+        tooltip: {
+          enabled: true,
+          backgroundColor: 'rgba(0, 0, 0, 0.75)',
+          titleColor: '#fff',
+          bodyColor: '#ddd',
+          borderColor: 'rgba(255,255,255,0.15)',
+          borderWidth: 1,
+          cornerRadius: 8,
+          padding: 10,
+          boxPadding: 4,
+          callbacks: {
+            label: (ctx) => ' ' + ctx.label + ': ' + fmtNum(ctx.raw),
+          }
+        }
+      },
+      animation: { animateRotate: true, duration: 800 }
+    },
+  });
 }
 
 /* ═══════════════════════════════════════════════════════════
@@ -920,6 +1483,11 @@ function timeAgo(iso) {
   return d.toLocaleDateString();
 }
 
+function shortModel(m) {
+  if (!m) return '?';
+  return m.replace(/^(Qwen\/|deepseek-ai\/|openai\/)/, '').replace(/-Instruct$/, '').slice(0, 24);
+}
+
 function formatMd(text) {
   let html = esc(text);
   html = html.replace(/```(\w*)\n([\s\S]*?)```/g, '<pre><code>$2</code></pre>');
@@ -931,4 +1499,170 @@ function formatMd(text) {
 }
 
 window.logout = logout;
+
+/* ═══════════════════════════════════════════════════════════
+   INTERACTIVE BACKGROUND — Physics-based MAC/MBM particles
+   Text particles scatter on hover/touch, spring back to origin
+   ═══════════════════════════════════════════════════════════ */
+const BG = {
+  canvas: null, ctx: null, particles: [], mouse: { x: -9999, y: -9999, active: false },
+  raf: null, dpr: 1, W: 0, H: 0,
+  REPEL_RADIUS: 120,
+  REPEL_FORCE: 8,
+  SPRING: 0.04,
+  DAMPING: 0.88,
+  WORDS: ['MAC', 'MBM', 'MAC', 'MBM', 'AI', 'MAC', 'MBM'],
+  FONT_SIZES: [11, 13, 15],
+  OPACITY_RANGE: [0.03, 0.07],
+};
+
+function initBgCanvas() {
+  // Create persistent canvas (lives outside #app so it survives re-renders)
+  let canvas = document.getElementById('bg-canvas');
+  if (!canvas) {
+    canvas = document.createElement('canvas');
+    canvas.id = 'bg-canvas';
+    document.body.insertBefore(canvas, document.body.firstChild);
+  }
+  BG.canvas = canvas;
+  BG.ctx = canvas.getContext('2d');
+  BG.dpr = Math.min(window.devicePixelRatio || 1, 2);
+  resizeBg();
+  spawnParticles();
+  bindBgEvents();
+  if (!BG.raf) animateBg();
+}
+
+function resizeBg() {
+  BG.W = window.innerWidth;
+  BG.H = window.innerHeight;
+  BG.canvas.width = BG.W * BG.dpr;
+  BG.canvas.height = BG.H * BG.dpr;
+  BG.canvas.style.width = BG.W + 'px';
+  BG.canvas.style.height = BG.H + 'px';
+  BG.ctx.setTransform(BG.dpr, 0, 0, BG.dpr, 0, 0);
+}
+
+function spawnParticles() {
+  BG.particles = [];
+  const spacing = 80;
+  const cols = Math.ceil(BG.W / spacing) + 1;
+  const rows = Math.ceil(BG.H / spacing) + 1;
+  let idx = 0;
+  for (let r = 0; r < rows; r++) {
+    for (let c = 0; c < cols; c++) {
+      const ox = c * spacing + (r % 2 === 0 ? 0 : spacing * 0.5) + (Math.random() - 0.5) * 20;
+      const oy = r * spacing + (Math.random() - 0.5) * 16;
+      const word = BG.WORDS[idx % BG.WORDS.length];
+      const fontSize = BG.FONT_SIZES[idx % BG.FONT_SIZES.length];
+      const opMin = BG.OPACITY_RANGE[0], opMax = BG.OPACITY_RANGE[1];
+      const baseOpacity = opMin + Math.random() * (opMax - opMin);
+      BG.particles.push({
+        ox, oy,           // origin
+        x: ox, y: oy,     // current
+        vx: 0, vy: 0,     // velocity
+        word,
+        fontSize,
+        baseOpacity,
+        opacity: baseOpacity,
+        rotation: (Math.random() - 0.5) * 0.3,
+        rotOrigin: 0,
+        rot: 0,
+      });
+      BG.particles[BG.particles.length - 1].rotOrigin = BG.particles[BG.particles.length - 1].rotation;
+      idx++;
+    }
+  }
+}
+
+function bindBgEvents() {
+  const onMove = (x, y) => { BG.mouse.x = x; BG.mouse.y = y; BG.mouse.active = true; };
+
+  window.addEventListener('mousemove', e => onMove(e.clientX, e.clientY), { passive: true });
+  window.addEventListener('touchmove', e => {
+    if (e.touches.length > 0) onMove(e.touches[0].clientX, e.touches[0].clientY);
+  }, { passive: true });
+  window.addEventListener('touchstart', e => {
+    if (e.touches.length > 0) onMove(e.touches[0].clientX, e.touches[0].clientY);
+  }, { passive: true });
+  window.addEventListener('mouseleave', () => { BG.mouse.active = false; BG.mouse.x = -9999; BG.mouse.y = -9999; });
+  window.addEventListener('touchend', () => { BG.mouse.active = false; BG.mouse.x = -9999; BG.mouse.y = -9999; }, { passive: true });
+
+  let resizeTimer;
+  window.addEventListener('resize', () => {
+    clearTimeout(resizeTimer);
+    resizeTimer = setTimeout(() => { resizeBg(); spawnParticles(); }, 200);
+  });
+}
+
+function animateBg() {
+  const { ctx, particles, mouse, W, H } = BG;
+  ctx.clearRect(0, 0, W, H);
+
+  const rr = BG.REPEL_RADIUS;
+  const rr2 = rr * rr;
+  const force = BG.REPEL_FORCE;
+  const spring = BG.SPRING;
+  const damp = BG.DAMPING;
+
+  for (let i = 0; i < particles.length; i++) {
+    const p = particles[i];
+
+    // Repulsion from mouse
+    const dx = p.x - mouse.x;
+    const dy = p.y - mouse.y;
+    const dist2 = dx * dx + dy * dy;
+
+    if (dist2 < rr2 && dist2 > 0.1) {
+      const dist = Math.sqrt(dist2);
+      const f = (1 - dist / rr) * force;
+      p.vx += (dx / dist) * f;
+      p.vy += (dy / dist) * f;
+      // Spin on repel
+      p.rot += (dx > 0 ? 0.1 : -0.1) * f * 0.05;
+      // Boost opacity when disturbed
+      p.opacity = Math.min(0.18, p.baseOpacity + (1 - dist / rr) * 0.12);
+    } else {
+      // Fade back to base
+      p.opacity += (p.baseOpacity - p.opacity) * 0.05;
+    }
+
+    // Spring back to origin
+    p.vx += (p.ox - p.x) * spring;
+    p.vy += (p.oy - p.y) * spring;
+
+    // Damping
+    p.vx *= damp;
+    p.vy *= damp;
+
+    // Rotation spring
+    p.rot += (p.rotOrigin - p.rot) * 0.03;
+
+    // Integrate
+    p.x += p.vx;
+    p.y += p.vy;
+
+    // Draw
+    ctx.save();
+    ctx.translate(p.x, p.y);
+    ctx.rotate(p.rot);
+    ctx.font = `900 ${p.fontSize}px 'Courier New', monospace`;
+    ctx.fillStyle = `rgba(0,0,0,${p.opacity.toFixed(3)})`;
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(p.word, 0, 0);
+    ctx.restore();
+  }
+
+  BG.raf = requestAnimationFrame(animateBg);
+}
+
+// Initialize background on load
+document.addEventListener('DOMContentLoaded', initBgCanvas);
+// Also re-init if canvas gets removed (SPA navigation nukes #app, not body)
+const _origRender = render;
+window._bgCheck = () => {
+  if (!document.getElementById('bg-canvas')) initBgCanvas();
+};
+
 init();

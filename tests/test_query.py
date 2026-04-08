@@ -13,13 +13,13 @@ def test_smart_route_code_keywords():
 def test_smart_route_math_keywords():
     messages = [{"role": "user", "content": "Solve this integral of x squared and calculate the derivative"}]
     result = _smart_route(messages)
-    assert result == "deepseek-r1:8b"
+    assert result == "deepseek-r1:14b"
 
 
 def test_smart_route_general():
-    messages = [{"role": "user", "content": "Tell me about the history of India"}]
+    messages = [{"role": "user", "content": "Hello, how are you today?"}]
     result = _smart_route(messages)
-    assert result == "qwen2.5:14b"
+    assert result == "qwen2.5:7b"
 
 
 def test_smart_route_empty():

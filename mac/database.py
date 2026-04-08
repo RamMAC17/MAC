@@ -4,13 +4,18 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 from sqlalchemy.orm import DeclarativeBase
 from mac.config import settings
 
-# SQLite needs special connect_args
-connect_args = {"check_same_thread": False} if settings.is_sqlite else {}
+# SQLite needs special connect_args; PostgreSQL via asyncpg needs ssl for cloud providers
+connect_args = {}
+if settings.is_sqlite:
+    connect_args = {"check_same_thread": False}
+elif "neon.tech" in settings.database_url or "supabase" in settings.database_url:
+    connect_args = {"ssl": "require"}
 
 engine = create_async_engine(
     settings.database_url,
     echo=settings.mac_debug,
     connect_args=connect_args,
+    pool_pre_ping=True,
 )
 
 async_session = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)

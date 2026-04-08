@@ -8,7 +8,7 @@ from mac.schemas.explore import (
     HealthResponse, NodeHealth,
     UsageStatsResponse,
 )
-from mac.services.llm_service import DEFAULT_MODELS, list_ollama_models, get_ollama_model_detail
+from mac.services.llm_service import DEFAULT_MODELS
 from mac.middleware.auth_middleware import require_admin
 from mac.models.user import User
 
@@ -24,20 +24,10 @@ async def list_models(
     page: int = Query(1, ge=1),
     per_page: int = Query(20, ge=1, le=100),
 ):
-    """List all available models from Ollama + registry."""
-    ollama_models = await list_ollama_models()
-    ollama_names = {m.get("name", "").split(":")[0] + ":" + m.get("name", "").split(":")[-1] for m in ollama_models}
-
+    """List all available models from registry."""
     models = []
     for model_id, info in DEFAULT_MODELS.items():
-        tag = info["ollama_tag"]
-        is_loaded = any(tag in name or name.startswith(tag.split(":")[0]) for name in ollama_names)
-        model_status = "loaded" if is_loaded else "offline"
-
-        if status != "all" and model_status != status:
-            continue
-        if capability != "all" and capability not in info.get("capabilities", []):
-            continue
+        served = info.get("served_name", model_id)
 
         models.append(ModelInfo(
             id=model_id,
@@ -47,20 +37,13 @@ async def list_models(
             context_length=info.get("context_length", 4096),
             quantisation=info.get("quantisation", ""),
             vram_mb=info.get("vram_mb", 0),
-            status=model_status,
+            status="loaded",
             capabilities=info.get("capabilities", []),
         ))
 
-    # Also add any Ollama models NOT in our registry
-    for om in ollama_models:
-        name = om.get("name", "")
-        if not any(name.startswith(mid.split(":")[0]) for mid in DEFAULT_MODELS):
-            models.append(ModelInfo(
-                id=name,
-                name=name,
-                status="loaded",
-                capabilities=["chat"],
-            ))
+        if capability != "all" and capability not in info.get("capabilities", []):
+            models.pop()
+            continue
 
     total = len(models)
     start = (page - 1) * per_page
@@ -92,7 +75,6 @@ async def get_model(model_id: str):
         raise HTTPException(status_code=404, detail={"code": "not_found", "message": f"Model '{model_id}' not found"})
 
     info = DEFAULT_MODELS[model_id]
-    detail = await get_ollama_model_detail(info["ollama_tag"])
 
     return ModelDetail(
         id=model_id,
@@ -102,7 +84,7 @@ async def get_model(model_id: str):
         context_length=info.get("context_length", 4096),
         capabilities=info.get("capabilities", []),
         example_prompt=info.get("example_prompt", ""),
-        status="loaded" if detail else "offline",
+        status="loaded",
     )
 
 
@@ -170,19 +152,18 @@ async def list_endpoints():
 @router.get("/health", response_model=HealthResponse)
 async def health():
     """Platform health — models loaded, uptime."""
-    ollama_models = await list_ollama_models()
-    model_names = [m.get("name", "") for m in ollama_models]
+    model_names = [info["served_name"] for info in DEFAULT_MODELS.values()]
 
     return HealthResponse(
         status="healthy",
         uptime_seconds=int(time.time() - _START_TIME),
         version="1.0.0",
         nodes=[NodeHealth(
-            id="node-local",
-            gpu="auto-detected",
+            id="hf-inference",
+            gpu="HuggingFace Serverless",
             models_loaded=model_names,
             status="active",
         )],
-        models_loaded=len(ollama_models),
+        models_loaded=len(DEFAULT_MODELS),
         models_total=len(DEFAULT_MODELS),
     )

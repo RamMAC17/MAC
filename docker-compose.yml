@@ -1,13 +1,32 @@
 # ═══════════════════════════════════════════════════════════
-#  MAC — MBM AI Cloud  |  Docker Compose
+#  MAC — MBM AI Cloud  |  Local Server Setup
 # ═══════════════════════════════════════════════════════════
+#  This runs the ENTIRE AI platform on a single server PC.
+#  vLLM serves models on the GPU, MAC API handles everything else.
+#
+#  Prerequisites:
+#    - NVIDIA GPU with 24GB+ VRAM (RTX 3090/4090/A5000/A6000)
+#    - Docker + Docker Compose
+#    - NVIDIA Container Toolkit (nvidia-docker)
+#    - At least 32GB RAM, 100GB+ disk space
+#
 #  Usage:
-#    docker compose up -d          # start everything
-#    docker compose logs -f mac    # watch MAC logs
-#    docker compose down           # stop everything
+#    docker compose up -d              # start everything
+#    docker compose logs -f mac        # watch MAC API logs
+#    docker compose logs -f vllm-speed # watch speed model logs
+#    docker compose down               # stop everything
+#
+#  GPU Memory Planning (24GB GPU):
+#    vllm-speed   (Qwen2.5-7B)         ~  5GB  (gpu_memory_utilization=0.22)
+#    vllm-code    (Qwen2.5-Coder-7B)   ~  5GB  (gpu_memory_utilization=0.22)
+#    vllm-reason  (DeepSeek-R1-14B)    ~  9GB  (gpu_memory_utilization=0.35)
+#    Total                             ~ 19GB / 24GB
+#
+#  For 48GB+ GPU, uncomment vllm-intel to add Gemma-3-27B.
 # ═══════════════════════════════════════════════════════════
 
 services:
+
   # ── MAC API Server ──────────────────────────────────────
   mac:
     build: .
@@ -18,11 +37,13 @@ services:
     environment:
       - DATABASE_URL=postgresql+asyncpg://mac:mac_password@postgres:5432/mac_db
       - REDIS_URL=redis://redis:6379/0
-      - OLLAMA_BASE_URL=http://host.docker.internal:11434
-      - VLLM_BASE_URL=http://host.docker.internal:11434
+      - VLLM_BASE_URL=http://vllm-speed:8001
+      - VLLM_SPEED_URL=http://vllm-speed:8001
+      - VLLM_CODE_URL=http://vllm-code:8002
+      - VLLM_REASONING_URL=http://vllm-reason:8003
+      - VLLM_INTELLIGENCE_URL=http://vllm-intel:8004
       - QDRANT_URL=http://qdrant:6333
       - SEARXNG_URL=http://searxng:8080
-      - LITELLM_BASE_URL=http://litellm:4000
     depends_on:
       postgres:
         condition: service_healthy
@@ -32,7 +53,130 @@ services:
     networks:
       - mac-net
 
-  # ── PostgreSQL ──────────────────────────────────────────
+  # ═══════════════════════════════════════════════════════
+  #  vLLM GPU INFERENCE ENGINES
+  #  Each model runs as its own vLLM server on the GPU.
+  #  Adjust gpu_memory_utilization based on your GPU VRAM.
+  # ═══════════════════════════════════════════════════════
+
+  # ── Speed Model: Qwen2.5-7B (fast responses) ──────────
+  vllm-speed:
+    image: vllm/vllm-openai:latest
+    container_name: mac-vllm-speed
+    ports:
+      - "${VLLM_SPEED_PORT:-8001}:${VLLM_SPEED_PORT:-8001}"
+    environment:
+      - HF_HOME=/root/.cache/huggingface
+    volumes:
+      - hf-cache:/root/.cache/huggingface
+    command: >
+      --model ${VLLM_SPEED_MODEL:-Qwen/Qwen2.5-7B-Instruct}
+      --port ${VLLM_SPEED_PORT:-8001}
+      --gpu-memory-utilization ${VLLM_SPEED_GPU_MEM:-0.22}
+      --max-model-len ${VLLM_SPEED_MAX_LEN:-8192}
+      --dtype ${VLLM_DTYPE:-auto}
+      --trust-remote-code
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    restart: unless-stopped
+    networks:
+      - mac-net
+
+  # ── Code Model: Qwen2.5-Coder-7B (coding tasks) ──────
+  vllm-code:
+    image: vllm/vllm-openai:latest
+    container_name: mac-vllm-code
+    ports:
+      - "${VLLM_CODE_PORT:-8002}:${VLLM_CODE_PORT:-8002}"
+    environment:
+      - HF_HOME=/root/.cache/huggingface
+    volumes:
+      - hf-cache:/root/.cache/huggingface
+    command: >
+      --model ${VLLM_CODE_MODEL:-Qwen/Qwen2.5-Coder-7B-Instruct}
+      --port ${VLLM_CODE_PORT:-8002}
+      --gpu-memory-utilization ${VLLM_CODE_GPU_MEM:-0.22}
+      --max-model-len ${VLLM_CODE_MAX_LEN:-8192}
+      --dtype ${VLLM_DTYPE:-auto}
+      --trust-remote-code
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    restart: unless-stopped
+    networks:
+      - mac-net
+
+  # ── Reasoning Model: DeepSeek-R1-14B (math & logic) ──
+  vllm-reason:
+    image: vllm/vllm-openai:latest
+    container_name: mac-vllm-reason
+    ports:
+      - "${VLLM_REASON_PORT:-8003}:${VLLM_REASON_PORT:-8003}"
+    environment:
+      - HF_HOME=/root/.cache/huggingface
+    volumes:
+      - hf-cache:/root/.cache/huggingface
+    command: >
+      --model ${VLLM_REASON_MODEL:-deepseek-ai/DeepSeek-R1-Distill-Qwen-14B}
+      --port ${VLLM_REASON_PORT:-8003}
+      --gpu-memory-utilization ${VLLM_REASON_GPU_MEM:-0.35}
+      --max-model-len ${VLLM_REASON_MAX_LEN:-8192}
+      --dtype ${VLLM_DTYPE:-auto}
+      --trust-remote-code
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    restart: unless-stopped
+    networks:
+      - mac-net
+
+  # ── Intelligence Model: Gemma-3-27B (OPTIONAL — needs 48GB+ GPU) ──
+  # Uncomment this block if your GPU has enough VRAM (48GB+ or dual GPU)
+  # vllm-intel:
+  #   image: vllm/vllm-openai:latest
+  #   container_name: mac-vllm-intel
+  #   ports:
+  #     - "${VLLM_INTEL_PORT:-8004}:${VLLM_INTEL_PORT:-8004}"
+  #   environment:
+  #     - HF_HOME=/root/.cache/huggingface
+  #   volumes:
+  #     - hf-cache:/root/.cache/huggingface
+  #   command: >
+  #     --model ${VLLM_INTEL_MODEL:-google/gemma-3-27b-it}
+  #     --port ${VLLM_INTEL_PORT:-8004}
+  #     --gpu-memory-utilization ${VLLM_INTEL_GPU_MEM:-0.45}
+  #     --max-model-len ${VLLM_INTEL_MAX_LEN:-4096}
+  #     --dtype ${VLLM_DTYPE:-auto}
+  #     --trust-remote-code
+  #   deploy:
+  #     resources:
+  #       reservations:
+  #         devices:
+  #           - driver: nvidia
+  #             count: 1
+  #             capabilities: [gpu]
+  #   restart: unless-stopped
+  #   networks:
+  #     - mac-net
+
+  # ═══════════════════════════════════════════════════════
+  #  INFRASTRUCTURE SERVICES
+  # ═══════════════════════════════════════════════════════
+
+  # ── PostgreSQL — Persistent data store ─────────────────
   postgres:
     image: postgres:16-alpine
     container_name: mac-postgres
@@ -53,7 +197,7 @@ services:
     networks:
       - mac-net
 
-  # ── Redis ───────────────────────────────────────────────
+  # ── Redis — Rate limiting & caching ────────────────────
   redis:
     image: redis:7-alpine
     container_name: mac-redis
@@ -70,7 +214,7 @@ services:
     networks:
       - mac-net
 
-  # ── Nginx Reverse Proxy ────────────────────────────────
+  # ── Nginx — Reverse proxy + static files ───────────────
   nginx:
     image: nginx:alpine
     container_name: mac-nginx
@@ -78,6 +222,7 @@ services:
       - "80:80"
     volumes:
       - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./frontend:/usr/share/nginx/html:ro
     depends_on:
       - mac
     restart: unless-stopped
@@ -96,7 +241,7 @@ services:
     networks:
       - mac-net
 
-  # ── SearXNG — Self-hosted search ───────────────────────
+  # ── SearXNG — Self-hosted web search ───────────────────
   searxng:
     image: searxng/searxng:latest
     container_name: mac-searxng
@@ -110,24 +255,12 @@ services:
     networks:
       - mac-net
 
-  # ── LiteLLM — Model proxy (optional) ──────────────────
-  litellm:
-    image: ghcr.io/berriai/litellm:main-latest
-    container_name: mac-litellm
-    ports:
-      - "4000:4000"
-    volumes:
-      - ./litellm/config.yaml:/app/config.yaml:ro
-    command: ["--config", "/app/config.yaml", "--port", "4000"]
-    restart: unless-stopped
-    networks:
-      - mac-net
-
 volumes:
   pgdata:
   redisdata:
   qdrantdata:
   searxngdata:
+  hf-cache:      # Shared HuggingFace model cache across all vLLM instances
 
 networks:
   mac-net:

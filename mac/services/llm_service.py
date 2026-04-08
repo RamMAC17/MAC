@@ -1,59 +1,107 @@
-"""LLM service — proxy requests to vLLM / OpenAI-compatible backends."""
+"""LLM service — proxy requests to local vLLM GPU inference backends."""
 
-import time
 import json
+import time
 import httpx
 from typing import AsyncIterator
 from mac.config import settings
 from mac.utils.security import generate_request_id
 
-# Model registry — maps friendly IDs to served model names.
-# Works with any OpenAI-compatible backend (vLLM, Ollama /v1, LiteLLM).
-DEFAULT_MODELS = {
+# ═══════════════════════════════════════════════════════════
+#  MODEL REGISTRY
+#  Priority: MAC_MODELS_JSON env → built-in defaults
+#  Then filtered by MAC_ENABLED_MODELS if set.
+# ═══════════════════════════════════════════════════════════
+
+_BUILTIN_MODELS: dict[str, dict] = {
+    "qwen2.5:7b": {
+        "name": "Qwen2.5 7B",
+        "specialty": "Fast general chat, summarisation, Q&A",
+        "parameters": "7B",
+        "context_length": 32768,
+        "capabilities": ["chat", "completion"],
+        "category": "speed",
+        "served_name": "Qwen/Qwen2.5-7B-Instruct",
+        "url_key": "vllm_speed_url",
+    },
     "qwen2.5-coder:7b": {
         "name": "Qwen2.5-Coder 7B",
         "specialty": "Code generation, debugging, explanation",
         "parameters": "7B",
         "context_length": 32768,
         "capabilities": ["code", "chat", "completion"],
-        "served_name": "qwen2.5-coder:7b",
+        "category": "code",
+        "served_name": "Qwen/Qwen2.5-Coder-7B-Instruct",
+        "url_key": "vllm_code_url",
     },
-    "deepseek-r1:8b": {
-        "name": "DeepSeek-R1 8B",
-        "specialty": "Maths, reasoning, step-by-step logic",
-        "parameters": "8B",
+    "deepseek-r1:14b": {
+        "name": "DeepSeek-R1 14B",
+        "specialty": "Maths, reasoning, step-by-step logic, deep thinking",
+        "parameters": "14B",
         "context_length": 65536,
         "capabilities": ["reasoning", "math", "chat"],
-        "served_name": "deepseek-r1:8b",
+        "category": "reasoning",
+        "served_name": "deepseek-ai/DeepSeek-R1-Distill-Qwen-14B",
+        "url_key": "vllm_reasoning_url",
     },
-    "llava:7b": {
-        "name": "LLaVA 1.6 7B",
-        "specialty": "Image understanding and visual Q&A",
-        "parameters": "7B",
-        "context_length": 4096,
-        "capabilities": ["vision", "chat"],
-        "served_name": "llava:7b",
-    },
-    "qwen2.5:14b": {
-        "name": "Qwen2.5 14B",
-        "specialty": "General purpose — essays, summarisation, Q&A",
-        "parameters": "14B",
-        "context_length": 32768,
+    "gemma3:27b": {
+        "name": "Gemma 3 27B",
+        "specialty": "Highest intelligence — complex analysis, creative writing, research",
+        "parameters": "27B",
+        "context_length": 8192,
         "capabilities": ["chat", "completion", "reasoning"],
-        "served_name": "qwen2.5:14b",
-    },
-    "whisper-large-v3": {
-        "name": "Whisper Large V3",
-        "specialty": "Speech-to-text transcription and translation",
-        "parameters": "1.5B",
-        "context_length": 0,
-        "capabilities": ["speech"],
-        "served_name": "whisper-large-v3",
+        "category": "intel",
+        "served_name": "google/gemma-3-27b-it",
+        "url_key": "vllm_intelligence_url",
     },
 }
 
-# The default/auto model for routing
-AUTO_MODEL = "qwen2.5-coder:7b"
+
+def _load_models() -> dict[str, dict]:
+    """Load model registry: MAC_MODELS_JSON env > built-in defaults, filtered by MAC_ENABLED_MODELS."""
+    if settings.mac_models_json.strip():
+        try:
+            models_list = json.loads(settings.mac_models_json)
+            registry: dict[str, dict] = {}
+            for m in models_list:
+                mid = m.pop("id")
+                registry[mid] = m
+            return registry
+        except (json.JSONDecodeError, TypeError, KeyError):
+            pass
+    registry = dict(_BUILTIN_MODELS)
+    enabled = settings.mac_enabled_models.strip()
+    if enabled:
+        enabled_set = {e.strip() for e in enabled.split(",") if e.strip()}
+        registry = {k: v for k, v in registry.items() if k in enabled_set}
+    return registry
+
+
+DEFAULT_MODELS = _load_models()
+
+
+def _get_auto_model() -> str:
+    """Determine the auto-routing fallback model from config or first code/speed model."""
+    fb = settings.mac_auto_fallback.strip()
+    if fb:
+        return fb
+    for cat in ("code", "speed"):
+        for mid, info in DEFAULT_MODELS.items():
+            if info.get("category") == cat:
+                return mid
+    return next(iter(DEFAULT_MODELS), "qwen2.5:7b")
+
+
+AUTO_MODEL = _get_auto_model()
+
+
+def _find_by_category(category: str) -> str:
+    """Return the first model ID matching *category*, or AUTO_MODEL as fallback."""
+    for mid, info in DEFAULT_MODELS.items():
+        if info.get("category") == category:
+            return mid
+    return AUTO_MODEL
+
 
 # Smart routing keywords
 _CODE_KEYWORDS = {"code", "function", "bug", "error", "debug", "python", "javascript",
@@ -64,36 +112,52 @@ _MATH_KEYWORDS = {"math", "equation", "calculate", "prove", "integral", "derivat
                   "theorem", "matrix", "algebra", "calculus", "probability",
                   "statistics", "geometry", "trigonometry", "factorial", "logarithm",
                   "solve", "sum of", "product of", "limit", "series"}
+_INTEL_KEYWORDS = {"explain", "analyze", "analyse", "research", "essay", "write",
+                   "creative", "story", "compare", "evaluate", "summarize", "summarise",
+                   "thesis", "report", "critical", "philosophy", "history", "science",
+                   "detailed", "comprehensive", "in-depth"}
 
 
 def _smart_route(messages: list[dict] | None = None) -> str:
-    """Pick the best model based on message content keywords."""
+    """Pick the best model based on message content."""
     if not messages:
         return AUTO_MODEL
     text = " ".join(m.get("content", "") for m in messages).lower()
     code_score = sum(1 for k in _CODE_KEYWORDS if k in text)
     math_score = sum(1 for k in _MATH_KEYWORDS if k in text)
+    intel_score = sum(1 for k in _INTEL_KEYWORDS if k in text)
+
     if math_score > code_score and math_score >= 2:
-        return "deepseek-r1:8b"
+        return _find_by_category("reasoning")
     if code_score >= 1:
-        return "qwen2.5-coder:7b"
-    # Default to general-purpose model
-    return "qwen2.5:14b"
+        return _find_by_category("code")
+    if intel_score >= 2:
+        return _find_by_category("intel")
+    return _find_by_category("speed")
 
 
-def _resolve_model(model_id: str, messages: list[dict] | None = None) -> str:
-    """Resolve 'auto' or friendly name to served model name."""
+def _resolve_model(model_id: str, messages: list[dict] | None = None) -> tuple[str, str]:
+    """Resolve model ID → (served_name, base_url)."""
     if model_id == "auto":
-        return _smart_route(messages)
+        model_id = _smart_route(messages)
     if model_id in DEFAULT_MODELS:
-        return DEFAULT_MODELS[model_id]["served_name"]
-    return model_id
+        m = DEFAULT_MODELS[model_id]
+        url = getattr(settings, m.get("url_key", "vllm_speed_url"), settings.vllm_base_url)
+        return m["served_name"], url
+    # Fallback: unknown model → send to default vLLM endpoint
+    return model_id, settings.vllm_base_url
 
 
-def _api_url(path: str) -> str:
-    """Build full URL for vLLM / OpenAI-compatible endpoint."""
-    base = settings.vllm_base_url.rstrip("/")
-    return f"{base}{path}"
+def _api_url(base: str, path: str) -> str:
+    """Build full URL for a vLLM endpoint."""
+    return f"{base.rstrip('/')}{path}"
+
+
+def _auth_headers() -> dict:
+    """Return auth headers if an API key is configured."""
+    if settings.vllm_api_key:
+        return {"Authorization": f"Bearer {settings.vllm_api_key}"}
+    return {}
 
 
 async def chat_completion(
@@ -106,8 +170,8 @@ async def chat_completion(
     presence_penalty: float = 0.0,
     stop: list[str] | str | None = None,
 ) -> dict:
-    """Send a chat completion via OpenAI-compatible API (vLLM / Ollama /v1)."""
-    resolved = _resolve_model(model, messages)
+    """Chat completion via local vLLM (OpenAI-compatible API)."""
+    resolved, base_url = _resolve_model(model, messages)
     request_id = generate_request_id("mac-chat")
     start = time.time()
 
@@ -124,16 +188,19 @@ async def chat_completion(
     if stop:
         payload["stop"] = stop if isinstance(stop, list) else [stop]
 
-    async with httpx.AsyncClient(timeout=120.0) as client:
-        resp = await client.post(_api_url("/v1/chat/completions"), json=payload)
+    async with httpx.AsyncClient(timeout=settings.vllm_timeout) as client:
+        resp = await client.post(_api_url(base_url, "/v1/chat/completions"), json=payload, headers=_auth_headers())
         resp.raise_for_status()
         data = resp.json()
 
     latency_ms = int((time.time() - start) * 1000)
-
-    # vLLM / OpenAI response is already in the right format
     usage = data.get("usage", {})
     choice = data["choices"][0]
+    msg = choice["message"]
+    content = msg.get("content") or ""
+    reasoning = msg.get("reasoning_content")
+    if not content and reasoning:
+        content = reasoning
 
     return {
         "id": data.get("id", request_id),
@@ -143,7 +210,8 @@ async def chat_completion(
         "choices": [
             {
                 "index": 0,
-                "message": {"role": "assistant", "content": choice["message"]["content"]},
+                "message": {"role": "assistant", "content": content, **({
+                    "reasoning_content": reasoning} if reasoning else {})},
                 "finish_reason": choice.get("finish_reason", "stop"),
             }
         ],
@@ -165,8 +233,8 @@ async def chat_completion_stream(
     top_p: float = 1.0,
     stop: list[str] | str | None = None,
 ) -> AsyncIterator[str]:
-    """Stream a chat completion as SSE data lines (OpenAI-compatible)."""
-    resolved = _resolve_model(model, messages)
+    """Stream a chat completion as SSE data lines."""
+    resolved, base_url = _resolve_model(model, messages)
     request_id = generate_request_id("mac-chat")
 
     payload: dict = {
@@ -180,44 +248,54 @@ async def chat_completion_stream(
     if stop:
         payload["stop"] = stop if isinstance(stop, list) else [stop]
 
-    async with httpx.AsyncClient(timeout=120.0) as client:
-        async with client.stream("POST", _api_url("/v1/chat/completions"), json=payload) as resp:
-            if resp.status_code != 200:
-                body = await resp.aread()
-                err_msg = body.decode(errors="replace")[:200]
-                error_sse = {
-                    "id": request_id,
-                    "object": "chat.completion.chunk",
-                    "error": {"code": "model_unavailable", "message": f"Backend returned {resp.status_code}: {err_msg}"},
-                }
-                yield f"data: {json.dumps(error_sse)}\n\n"
-                yield "data: [DONE]\n\n"
-                return
-            async for line in resp.aiter_lines():
-                if not line:
-                    continue
-                # OpenAI SSE format: "data: {...}" or "data: [DONE]"
-                text = line.removeprefix("data: ").strip()
-                if not text or text == "[DONE]":
-                    if text == "[DONE]":
-                        yield "data: [DONE]\n\n"
-                    continue
-                try:
-                    chunk = json.loads(text)
-                except json.JSONDecodeError:
-                    continue
-                delta = chunk.get("choices", [{}])[0].get("delta", {})
-                content = delta.get("content", "")
-                if content:
-                    sse = {
-                        "id": chunk.get("id", request_id),
+    done_sent = False
+    async with httpx.AsyncClient(timeout=settings.vllm_timeout) as client:
+        try:
+            async with client.stream("POST", _api_url(base_url, "/v1/chat/completions"), json=payload, headers=_auth_headers()) as resp:
+                if resp.status_code != 200:
+                    body = await resp.aread()
+                    err_msg = body.decode(errors="replace")[:200]
+                    error_sse = {
+                        "id": request_id,
                         "object": "chat.completion.chunk",
-                        "choices": [{"delta": {"content": content}, "index": 0}],
+                        "error": {"code": "model_unavailable", "message": f"vLLM returned {resp.status_code}: {err_msg}"},
                     }
-                    yield f"data: {json.dumps(sse)}\n\n"
-                finish = chunk.get("choices", [{}])[0].get("finish_reason")
-                if finish:
+                    yield f"data: {json.dumps(error_sse)}\n\n"
                     yield "data: [DONE]\n\n"
+                    return
+                try:
+                    async for line in resp.aiter_lines():
+                        if not line:
+                            continue
+                        text = line.removeprefix("data: ").strip()
+                        if not text or text == "[DONE]":
+                            if text == "[DONE]" and not done_sent:
+                                done_sent = True
+                                yield "data: [DONE]\n\n"
+                            continue
+                        try:
+                            chunk = json.loads(text)
+                        except json.JSONDecodeError:
+                            continue
+                        delta = chunk.get("choices", [{}])[0].get("delta", {})
+                        content = delta.get("content", "")
+                        if content:
+                            sse = {
+                                "id": chunk.get("id", request_id),
+                                "object": "chat.completion.chunk",
+                                "choices": [{"delta": {"content": content}, "index": 0}],
+                            }
+                            yield f"data: {json.dumps(sse)}\n\n"
+                        finish = chunk.get("choices", [{}])[0].get("finish_reason")
+                        if finish and not done_sent:
+                            done_sent = True
+                            yield "data: [DONE]\n\n"
+                except (httpx.RemoteProtocolError, httpx.ReadError):
+                    pass
+        except (httpx.RemoteProtocolError, httpx.ReadError):
+            pass
+    if not done_sent:
+        yield "data: [DONE]\n\n"
 
 
 async def text_completion(
@@ -227,14 +305,14 @@ async def text_completion(
     temperature: float = 0.7,
     stop: list[str] | str | None = None,
 ) -> dict:
-    """Text completion via OpenAI-compatible /v1/completions."""
-    resolved = _resolve_model(model)
+    """Text completion via chat endpoint (vLLM supports both)."""
+    resolved, base_url = _resolve_model(model)
     request_id = generate_request_id("mac-comp")
     start = time.time()
 
     payload: dict = {
         "model": resolved,
-        "prompt": prompt,
+        "messages": [{"role": "user", "content": prompt}],
         "max_tokens": max_tokens,
         "temperature": temperature,
         "stream": False,
@@ -242,21 +320,22 @@ async def text_completion(
     if stop:
         payload["stop"] = stop if isinstance(stop, list) else [stop]
 
-    async with httpx.AsyncClient(timeout=120.0) as client:
-        resp = await client.post(_api_url("/v1/completions"), json=payload)
+    async with httpx.AsyncClient(timeout=settings.vllm_timeout) as client:
+        resp = await client.post(_api_url(base_url, "/v1/chat/completions"), json=payload, headers=_auth_headers())
         resp.raise_for_status()
         data = resp.json()
 
     latency_ms = int((time.time() - start) * 1000)
     usage = data.get("usage", {})
     choice = data["choices"][0]
+    text = choice.get("text") or choice.get("message", {}).get("content") or ""
 
     return {
         "id": data.get("id", request_id),
         "object": "text_completion",
         "created": data.get("created", int(time.time())),
         "model": resolved,
-        "choices": [{"text": choice.get("text", ""), "index": 0, "finish_reason": choice.get("finish_reason", "stop")}],
+        "choices": [{"text": text, "index": 0, "finish_reason": choice.get("finish_reason", "stop")}],
         "usage": {
             "prompt_tokens": usage.get("prompt_tokens", 0),
             "completion_tokens": usage.get("completion_tokens", 0),
@@ -267,13 +346,14 @@ async def text_completion(
 
 
 async def generate_embeddings(texts: list[str], model: str = "default") -> dict:
-    """Generate embeddings via OpenAI-compatible /v1/embeddings."""
+    """Generate embeddings via vLLM /v1/embeddings."""
     resolved = "nomic-embed-text" if model == "default" else model
 
-    async with httpx.AsyncClient(timeout=60.0) as client:
+    async with httpx.AsyncClient(timeout=settings.vllm_timeout) as client:
         resp = await client.post(
-            _api_url("/v1/embeddings"),
+            _api_url(settings.vllm_base_url, "/v1/embeddings"),
             json={"model": resolved, "input": texts},
+            headers=_auth_headers(),
         )
         resp.raise_for_status()
         data = resp.json()
@@ -287,30 +367,56 @@ async def generate_embeddings(texts: list[str], model: str = "default") -> dict:
 
 
 async def list_available_models() -> list[dict]:
-    """Fetch models from the OpenAI-compatible /v1/models endpoint."""
-    try:
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            resp = await client.get(_api_url("/v1/models"))
-            resp.raise_for_status()
-            data = resp.json()
-            return data.get("data", [])
-    except Exception:
-        return []
+    """Return all configured models with live health status from vLLM."""
+    results = []
+    url_status: dict[str, str] = {}
+
+    for model_id, info in DEFAULT_MODELS.items():
+        url = getattr(settings, info.get("url_key", "vllm_speed_url"), settings.vllm_base_url)
+
+        if url not in url_status:
+            status = "offline"
+            try:
+                async with httpx.AsyncClient(timeout=settings.vllm_health_timeout) as client:
+                    resp = await client.get(_api_url(url, "/v1/models"), headers=_auth_headers())
+                    if resp.status_code == 200:
+                        status = "loaded"
+            except Exception:
+                pass
+            url_status[url] = status
+
+        results.append({
+            "id": info["served_name"],
+            "name": info["name"],
+            "friendly_id": model_id,
+            "specialty": info["specialty"],
+            "parameters": info["parameters"],
+            "category": info["category"],
+            "context_length": info["context_length"],
+            "capabilities": info["capabilities"],
+            "status": url_status[url],
+        })
+
+    return results
 
 
-# Keep backward-compat aliases
+# Backward compat
 list_ollama_models = list_available_models
 
 
 async def get_model_detail(model_name: str) -> dict | None:
-    """Get info about a model from /v1/models/{model}."""
-    try:
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            resp = await client.get(_api_url(f"/v1/models/{model_name}"))
-            resp.raise_for_status()
-            return resp.json()
-    except Exception:
-        return None
+    """Get info about a specific model."""
+    for model_id, info in DEFAULT_MODELS.items():
+        if model_name in (model_id, info["served_name"]):
+            url = getattr(settings, info.get("url_key", "vllm_speed_url"), settings.vllm_base_url)
+            try:
+                async with httpx.AsyncClient(timeout=settings.vllm_health_timeout) as client:
+                    resp = await client.get(_api_url(url, f"/v1/models/{info['served_name']}"), headers=_auth_headers())
+                    resp.raise_for_status()
+                    return {**resp.json(), "category": info["category"], "specialty": info["specialty"]}
+            except Exception:
+                return {"id": info["served_name"], "name": info["name"], "status": "offline"}
+    return None
 
 
 # Keep backward-compat alias
@@ -320,10 +426,10 @@ get_ollama_model_detail = get_model_detail
 async def vision_chat(
     image_b64: str,
     prompt: str,
-    model: str = "llava:7b",
+    model: str = "auto",
 ) -> dict:
     """Send an image + prompt to a vision model via OpenAI-compatible API."""
-    resolved = _resolve_model(model)
+    resolved, base_url = _resolve_model(model)
     request_id = generate_request_id("mac-vis")
     start = time.time()
 
@@ -338,12 +444,12 @@ async def vision_chat(
                 ],
             },
         ],
-        "max_tokens": 1024,
+        "max_tokens": settings.mac_default_max_tokens,
         "stream": False,
     }
 
-    async with httpx.AsyncClient(timeout=120.0) as client:
-        resp = await client.post(_api_url("/v1/chat/completions"), json=payload)
+    async with httpx.AsyncClient(timeout=settings.vllm_timeout) as client:
+        resp = await client.post(_api_url(base_url, "/v1/chat/completions"), json=payload, headers=_auth_headers())
         resp.raise_for_status()
         data = resp.json()
 

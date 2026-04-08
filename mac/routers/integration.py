@@ -15,7 +15,7 @@ router = APIRouter(prefix="/integration", tags=["Integration"])
 _routing_rules = [
     RoutingRule(task_type="code", target_model="qwen2.5-coder:7b", priority=1),
     RoutingRule(task_type="math", target_model="deepseek-r1:8b", priority=1),
-    RoutingRule(task_type="vision", target_model="llava:7b", priority=1),
+    RoutingRule(task_type="vision", target_model="qwen2.5:7b", priority=1),
     RoutingRule(task_type="audio", target_model="whisper-large-v3", priority=1),
     RoutingRule(task_type="general", target_model="qwen2.5:14b", priority=1),
 ]
