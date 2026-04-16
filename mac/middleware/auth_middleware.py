@@ -1,4 +1,4 @@
-"""Auth dependency — extracts user from JWT or API key."""
+"""Auth dependency — extracts user from JWT, API key, or scoped API key."""
 
 from fastapi import Depends, HTTPException, Request
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
@@ -16,11 +16,12 @@ async def get_current_user(
     db: AsyncSession = Depends(get_db),
 ) -> User:
     """Extract and validate the current user from Authorization header.
-    Supports both JWT access tokens and API keys (mac_sk_live_xxx).
+    Supports JWT access tokens, legacy API keys (mac_sk_live_xxx),
+    and scoped API keys (mac_sk_xxx).
     """
     token = credentials.credentials
 
-    # Check if it's an API key
+    # Check if it's a legacy API key
     if token.startswith("mac_sk_live_"):
         user = await get_user_by_api_key(db, token)
         if not user or not user.is_active:
@@ -28,6 +29,25 @@ async def get_current_user(
                 "code": "authentication_failed",
                 "message": "Invalid or inactive API key",
             })
+        return user
+
+    # Check if it's a scoped API key (mac_sk_ but not mac_sk_live_)
+    if token.startswith("mac_sk_"):
+        from mac.services.scoped_key_service import get_key_by_hash
+        scoped_key = await get_key_by_hash(db, token)
+        if not scoped_key:
+            raise HTTPException(status_code=401, detail={
+                "code": "authentication_failed",
+                "message": "Invalid, expired, or revoked API key",
+            })
+        user = await get_user_by_id(db, scoped_key.user_id)
+        if not user or not user.is_active:
+            raise HTTPException(status_code=401, detail={
+                "code": "authentication_failed",
+                "message": "User not found or inactive",
+            })
+        # Attach scoped key info to request state for downstream checks
+        user._scoped_key = scoped_key
         return user
 
     # Otherwise treat as JWT
@@ -54,5 +74,15 @@ async def require_admin(user: User = Depends(get_current_user)) -> User:
         raise HTTPException(status_code=403, detail={
             "code": "forbidden",
             "message": "Admin access required",
+        })
+    return user
+
+
+async def require_faculty_or_admin(user: User = Depends(get_current_user)) -> User:
+    """Require faculty or admin role."""
+    if user.role not in ("faculty", "admin"):
+        raise HTTPException(status_code=403, detail={
+            "code": "forbidden",
+            "message": "Faculty or admin access required",
         })
     return user

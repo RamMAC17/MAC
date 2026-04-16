@@ -6,6 +6,20 @@
 // ── API helper ────────────────────────────────────────────
 const API = '/api/v1';
 const state = { token: localStorage.getItem('mac_token'), user: null, page: 'login' };
+let deferredInstallPrompt = null;
+
+// ── PWA install prompt capture ────────────────────────────
+window.addEventListener('beforeinstallprompt', e => {
+  e.preventDefault();
+  deferredInstallPrompt = e;
+  const btn = document.getElementById('pwa-install-btn');
+  if (btn) btn.style.display = '';
+});
+window.addEventListener('appinstalled', () => {
+  deferredInstallPrompt = null;
+  const btn = document.getElementById('pwa-install-btn');
+  if (btn) btn.style.display = 'none';
+});
 
 async function api(path, opts = {}) {
   const headers = { 'Content-Type': 'application/json', ...(opts.headers || {}) };
@@ -24,6 +38,35 @@ function getSession(id) { return getSessions().find(s => s.id === id); }
 // ── Eye toggle SVGs ───────────────────────────────────────
 const EYE_OPEN = '<svg viewBox="0 0 24 24"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>';
 const EYE_CLOSED = '<svg viewBox="0 0 24 24"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94"/><path d="M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19"/><line x1="1" y1="1" x2="23" y2="23"/></svg>';
+
+// ── MAC Thinking Animation ────────────────────────────────
+function macThinkingHTML() {
+  return `<div class="mac-thinking">
+    <div class="mac-think-orb">
+      <div class="mac-think-ring"></div>
+      <div class="mac-think-ring r2"></div>
+      <div class="mac-think-ring r3"></div>
+      <div class="mac-think-letters">
+        <span class="mac-tl" style="--i:0">M</span>
+        <span class="mac-tl" style="--i:1">A</span>
+        <span class="mac-tl" style="--i:2">C</span>
+      </div>
+    </div>
+    <span class="mac-think-label">Thinking</span>
+  </div>`;
+}
+function startMacThinking(el) {
+  const letters = el.querySelectorAll('.mac-tl');
+  let active = 0;
+  const iv = setInterval(() => {
+    letters.forEach((l, i) => l.classList.toggle('lit', i === active));
+    active = (active + 1) % letters.length;
+  }, 400);
+  el._macThinkIv = iv;
+}
+function stopMacThinking(el) {
+  if (el._macThinkIv) { clearInterval(el._macThinkIv); el._macThinkIv = null; }
+}
 
 function pwField(id, label, placeholder) {
   return `<div class="field">
@@ -71,7 +114,7 @@ window.addEventListener('popstate', () => {
 
 // ── Bootstrap ─────────────────────────────────────────────
 async function init() {
-  if ('serviceWorker' in navigator) navigator.serviceWorker.register('/static/sw.js');
+  if ('serviceWorker' in navigator) navigator.serviceWorker.register('/static/sw.js', {scope: '/'});
   if (state.token) {
     try {
       const u = await apiJson('/auth/me');
@@ -82,13 +125,18 @@ async function init() {
         state.page = 'login';
       } else {
         state.page = location.hash.slice(1) || 'dashboard';
+        // Subscribe to push notifications
+        subscribeToPush();
       }
     } catch { state.token = null; localStorage.removeItem('mac_token'); state.page = 'login'; }
   }
   render();
 }
 
+let _dashRefreshIv = null;
 function render() {
+  // Clear dashboard auto-refresh when navigating away
+  if (_dashRefreshIv) { clearInterval(_dashRefreshIv); _dashRefreshIv = null; }
   const app = document.getElementById('app');
   if (!state.token || state.page === 'login') { app.innerHTML = authPage(); bindAuth(); return; }
   if (state.user && state.user.must_change_password) {
@@ -100,17 +148,30 @@ function render() {
   if (state.page === 'set-password') { app.innerHTML = setPasswordPage(); bindSetPassword(); bindEyeToggles(); return; }
   app.innerHTML = shell();
   bindShell();
-  if (state.page === 'dashboard') renderDashboard();
+  if (state.page === 'dashboard') {
+    renderDashboard();
+    _dashRefreshIv = setInterval(() => { if (state.page === 'dashboard') renderDashboard(); }, 30000);
+  }
   else if (state.page === 'chat') renderChat();
   else if (state.page === 'admin') renderAdmin();
   else if (state.page === 'settings') renderSettings();
-  else { state.page = 'dashboard'; renderDashboard(); }
+  else if (state.page === 'doubts') renderDoubts();
+  else if (state.page === 'attendance') renderAttendance();
+  else if (state.page === 'copycheck') renderCopyCheck();
+  else { state.page = 'dashboard'; renderDashboard(); _dashRefreshIv = setInterval(() => { if (state.page === 'dashboard') renderDashboard(); }, 30000); }
 }
 
 function logout() {
   state.token = null; state.user = null;
   localStorage.removeItem('mac_token');
   navigate('login');
+}
+
+async function installPWA() {
+  if (!deferredInstallPrompt) return;
+  deferredInstallPrompt.prompt();
+  const result = await deferredInstallPrompt.userChoice;
+  if (result.outcome === 'accepted') deferredInstallPrompt = null;
 }
 
 /* ═══════════════════════════════════════════════════════════
@@ -269,43 +330,63 @@ function bindSetPassword() {
 function shell() {
   const u = state.user || {};
   const isAdmin = u.role === 'admin';
-  const pages = { dashboard: 'Dashboard', chat: 'Chat', settings: 'Settings', admin: 'Admin' };
+  const isFacultyOrAdmin = u.role === 'faculty' || u.role === 'admin';
+  const pages = { dashboard: 'Dashboard', chat: 'Chat', doubts: 'Doubts', attendance: 'Attendance', copycheck: 'Copy Check', settings: 'Settings', admin: 'Admin' };
+  const dockSide = localStorage.getItem('mac_dock_side') || 'left';
   return `
-  <div class="shell" id="shell">
+  <div class="shell dock-${dockSide}" id="shell">
     <div class="sidebar-overlay" id="sidebar-overlay"></div>
     <nav class="sidebar" id="sidebar">
-      <div class="sidebar-header">
-        <div class="brand"><span class="glitch" data-text="MAC">MAC</span></div>
+      <div class="sidebar-resize" id="sidebar-resize"></div>
+      <div class="sidebar-grip" id="sidebar-grip" title="Drag to dock sidebar to any edge">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="8" cy="6" r="1.5"/><circle cx="16" cy="6" r="1.5"/><circle cx="8" cy="12" r="1.5"/><circle cx="16" cy="12" r="1.5"/><circle cx="8" cy="18" r="1.5"/><circle cx="16" cy="18" r="1.5"/></svg>
       </div>
-      <div class="sidebar-nav">
-        <a href="#dashboard" data-page="dashboard" class="${state.page==='dashboard'?'active':''}">
-          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg>
-          Dashboard
-        </a>
-        <a href="#chat" data-page="chat" class="${state.page==='chat'?'active':''}">
-          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
-          Chat
-        </a>
-        <a href="#settings" data-page="settings" class="${state.page==='settings'?'active':''}">
-          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
-          Settings
-        </a>
-        ${isAdmin ? `<a href="#admin" data-page="admin" class="${state.page==='admin'?'active':''}">
-          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
-          Admin Panel
-        </a>` : ''}
-      </div>
-      <div class="sidebar-user">
-        <div class="user-avatar">${(u.name || '?')[0].toUpperCase()}</div>
-        <div>
-          <div class="name">${esc(u.name || '')}</div>
-          <div style="font-size:.75rem">${esc(u.roll_number || '')} · <span class="badge badge-${u.role}">${esc(u.role || '')}</span></div>
+      <div class="sidebar-inner">
+        <div class="sidebar-header">
+          <div class="brand"><span class="glitch" data-text="MAC">MAC</span></div>
         </div>
+        <div class="sidebar-nav">
+          <a href="#dashboard" data-page="dashboard" class="${state.page==='dashboard'?'active':''}">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg>
+            <span>Dashboard</span>
+          </a>
+          <a href="#chat" data-page="chat" class="${state.page==='chat'?'active':''}">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
+            <span>Chat</span>
+          </a>
+          <a href="#doubts" data-page="doubts" class="${state.page==='doubts'?'active':''}">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
+            <span>Doubts</span>
+          </a>
+          ${isFacultyOrAdmin ? `<a href="#attendance" data-page="attendance" class="${state.page==='attendance'?'active':''}">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="4" width="18" height="18" rx="2" ry="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/><path d="M8 14l2 2 4-4"/></svg>
+            <span>Attendance</span>
+          </a>` : ''}
+          ${isFacultyOrAdmin ? `<a href="#copycheck" data-page="copycheck" class="${state.page==='copycheck'?'active':''}">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><path d="M9 15l2 2 4-4"/></svg>
+            <span>Copy Check</span>
+          </a>` : ''}
+          <a href="#settings" data-page="settings" class="${state.page==='settings'?'active':''}">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+            <span>Settings</span>
+          </a>
+          ${isAdmin ? `<a href="#admin" data-page="admin" class="${state.page==='admin'?'active':''}">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+            <span>Admin Panel</span>
+          </a>` : ''}
+        </div>
+        <div class="sidebar-user">
+          <div class="user-avatar">${(u.name || '?')[0].toUpperCase()}</div>
+          <div>
+            <div class="name">${esc(u.name || '')}</div>
+            <div style="font-size:.75rem">${esc(u.roll_number || '')} · <span class="badge badge-${u.role}">${esc(u.role || '')}</span></div>
+          </div>
+        </div>
+        <button class="btn btn-sm btn-outline sidebar-logout" onclick="logout()">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/></svg>
+          Sign Out
+        </button>
       </div>
-      <button class="btn btn-sm btn-outline sidebar-logout" onclick="logout()">
-        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/></svg>
-        Sign Out
-      </button>
     </nav>
     <div class="main-content">
       <div class="topbar">
@@ -314,11 +395,28 @@ function shell() {
         </button>
         <h1>${pages[state.page] || 'Dashboard'}</h1>
         <div class="topbar-right">
+          <button class="btn btn-sm pwa-install-btn" id="pwa-install-btn" style="display:${deferredInstallPrompt?'':'none'}" onclick="installPWA()" title="Install MAC App">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+            <span>Install</span>
+          </button>
+          <div class="notif-bell" id="notif-bell" title="Notifications">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 0 1-3.46 0"/></svg>
+            <span class="notif-badge" id="notif-count"></span>
+          </div>
           <span class="status-dot"></span>
           <span style="font-size:.75rem;color:var(--muted)">Online</span>
         </div>
       </div>
       <div class="page" id="page-content"></div>
+    </div>
+  </div>
+  <div class="notif-panel" id="notif-panel">
+    <div class="notif-panel-header">
+      <h3>Notifications</h3>
+      <button class="btn btn-sm btn-outline" id="notif-mark-all" style="padding:4px 10px;font-size:.72rem">Mark all read</button>
+    </div>
+    <div class="notif-list" id="notif-list">
+      <div class="notif-empty">No notifications</div>
     </div>
   </div>`;
 }
@@ -333,6 +431,153 @@ function bindShell() {
     document.getElementById('shell').classList.toggle('sidebar-open');
   };
   if (overlay) overlay.onclick = closeSidebar;
+
+  // ── Resizable sidebar (drag edge) ──────────────────────
+  const shellEl = document.getElementById('shell');
+  const sidebar = document.getElementById('sidebar');
+  const resizeHandle = document.getElementById('sidebar-resize');
+
+  if (resizeHandle && sidebar) {
+    let startPos, startSize;
+    resizeHandle.onmousedown = (e) => {
+      e.preventDefault();
+      const side = getCurrentDockSide();
+      const rect = sidebar.getBoundingClientRect();
+      startPos = (side === 'left' || side === 'right') ? e.clientX : e.clientY;
+      startSize = (side === 'left' || side === 'right') ? rect.width : rect.height;
+      document.body.style.cursor = (side === 'left' || side === 'right') ? 'col-resize' : 'row-resize';
+      document.body.style.userSelect = 'none';
+      function onMove(ev) {
+        const curSide = getCurrentDockSide();
+        let delta;
+        if (curSide === 'left') delta = ev.clientX - startPos;
+        else if (curSide === 'right') delta = startPos - ev.clientX;
+        else if (curSide === 'top') delta = ev.clientY - startPos;
+        else delta = startPos - ev.clientY;
+        let size = startSize + delta;
+        const isHoriz = curSide === 'left' || curSide === 'right';
+        const minSize = isHoriz ? 52 : 42;
+        const maxSize = isHoriz ? 400 : 300;
+        size = Math.max(minSize, Math.min(maxSize, size));
+        if (isHoriz) {
+          sidebar.style.width = size + 'px';
+          sidebar.style.height = '';
+          sidebar.classList.toggle('compact', size <= 70);
+        } else {
+          sidebar.style.height = size + 'px';
+          sidebar.style.width = '';
+        }
+      }
+      function onUp() {
+        document.removeEventListener('mousemove', onMove);
+        document.removeEventListener('mouseup', onUp);
+        document.body.style.cursor = '';
+        document.body.style.userSelect = '';
+      }
+      document.addEventListener('mousemove', onMove);
+      document.addEventListener('mouseup', onUp);
+    };
+    // Double-click to toggle compact/expanded
+    resizeHandle.ondblclick = () => {
+      const side = getCurrentDockSide();
+      if (side === 'left' || side === 'right') {
+        const w = sidebar.getBoundingClientRect().width;
+        if (w > 70) {
+          sidebar.style.width = '52px';
+          sidebar.classList.add('compact');
+        } else {
+          sidebar.style.width = '230px';
+          sidebar.classList.remove('compact');
+        }
+      } else {
+        const h = sidebar.getBoundingClientRect().height;
+        sidebar.style.height = (h > 60 ? '42px' : '120px');
+      }
+    };
+  }
+
+  // ── Drag sidebar grip to dock to any edge ──────────────
+  const grip = document.getElementById('sidebar-grip');
+  if (grip && sidebar) {
+    let dragOverlay;
+    grip.onmousedown = (e) => {
+      e.preventDefault();
+      // Create full-screen overlay with edge zones
+      dragOverlay = document.createElement('div');
+      dragOverlay.style.cssText = 'position:fixed;inset:0;z-index:9999;cursor:grabbing;';
+      const indicator = document.createElement('div');
+      indicator.style.cssText = 'position:fixed;background:rgba(0,0,0,.06);border:2px dashed rgba(0,0,0,.2);transition:all .15s;border-radius:4px;pointer-events:none;z-index:10000;';
+      dragOverlay.appendChild(indicator);
+      document.body.appendChild(dragOverlay);
+
+      function getZone(cx, cy) {
+        const w = window.innerWidth, h = window.innerHeight;
+        const edgeSize = 80;
+        if (cx < edgeSize) return 'left';
+        if (cx > w - edgeSize) return 'right';
+        if (cy < edgeSize) return 'top';
+        if (cy > h - edgeSize) return 'bottom';
+        return null;
+      }
+      function showIndicator(zone) {
+        if (!zone) { indicator.style.display = 'none'; return; }
+        indicator.style.display = 'block';
+        if (zone === 'left') { indicator.style.cssText += 'top:0;left:0;width:230px;height:100%;'; }
+        else if (zone === 'right') { indicator.style.cssText += 'top:0;right:0;left:auto;width:230px;height:100%;'; }
+        else if (zone === 'top') { indicator.style.cssText += 'top:0;left:0;width:100%;height:60px;'; }
+        else if (zone === 'bottom') { indicator.style.cssText += 'bottom:0;left:0;top:auto;width:100%;height:60px;'; }
+      }
+      function onMove(ev) {
+        const zone = getZone(ev.clientX, ev.clientY);
+        showIndicator(zone);
+      }
+      function onUp(ev) {
+        document.removeEventListener('mousemove', onMove);
+        document.removeEventListener('mouseup', onUp);
+        dragOverlay.remove();
+        const zone = getZone(ev.clientX, ev.clientY);
+        if (zone) setDockSide(zone);
+      }
+      document.addEventListener('mousemove', onMove);
+      document.addEventListener('mouseup', onUp);
+    };
+  }
+
+  function getCurrentDockSide() {
+    if (shellEl.classList.contains('dock-right')) return 'right';
+    if (shellEl.classList.contains('dock-top')) return 'top';
+    if (shellEl.classList.contains('dock-bottom')) return 'bottom';
+    return 'left';
+  }
+
+  function setDockSide(side) {
+    shellEl.classList.remove('dock-left', 'dock-right', 'dock-top', 'dock-bottom');
+    shellEl.classList.add('dock-' + side);
+    sidebar.style.width = '';
+    sidebar.style.height = '';
+    sidebar.classList.remove('compact');
+    localStorage.setItem('mac_dock_side', side);
+    // Reset sizes based on side
+    if (side === 'left' || side === 'right') {
+      sidebar.style.width = '230px';
+    } else {
+      sidebar.style.height = '52px';
+    }
+  }
+
+  // Notification bell
+  const bell = document.getElementById('notif-bell');
+  const panel = document.getElementById('notif-panel');
+  if (bell && panel) {
+    bell.onclick = (e) => { e.stopPropagation(); panel.classList.toggle('open'); if (panel.classList.contains('open')) loadNotifications(); };
+    document.addEventListener('click', (e) => { if (!panel.contains(e.target) && e.target !== bell) panel.classList.remove('open'); }, { once: false });
+  }
+  const markAllBtn = document.getElementById('notif-mark-all');
+  if (markAllBtn) markAllBtn.onclick = async () => {
+    try { await api('/notifications/read-all', { method: 'POST' }); loadNotifications(); loadNotifCount(); } catch {}
+  };
+  // Load notification count
+  loadNotifCount();
 }
 
 function closeSidebar() {
@@ -608,18 +853,25 @@ function renderHeatmap(containerId, data) {
   startDate.setDate(startDate.getDate() - days + 1);
   startDate.setDate(startDate.getDate() - startDate.getDay()); // align to Sunday
 
-  // --- Month labels: collect which columns each month spans ---
+  // --- Month labels: collect which columns each month spans, show year at boundary ---
   const monthSpans = [];
-  let curMonth = -1, spanStart = 0;
+  let curMonth = -1, curYear = -1, spanStart = 0;
   for (let w = 0; w < totalCols; w++) {
     const d = new Date(startDate); d.setDate(d.getDate() + w * 7);
-    const m = d.getMonth();
+    const m = d.getMonth(), y = d.getFullYear();
     if (m !== curMonth) {
-      if (curMonth !== -1) monthSpans.push({ name: new Date(startDate.getTime() + spanStart * 7 * 86400000).toLocaleString('en', { month: 'short' }), start: spanStart, span: w - spanStart });
+      if (curMonth !== -1) {
+        const sd = new Date(startDate.getTime() + spanStart * 7 * 86400000);
+        const label = sd.toLocaleString('en', { month: 'short' }) + (sd.getFullYear() !== curYear || spanStart === 0 ? " '" + String(sd.getFullYear()).slice(2) : '');
+        monthSpans.push({ name: label, start: spanStart, span: w - spanStart });
+        curYear = sd.getFullYear();
+      }
       curMonth = m; spanStart = w;
     }
   }
-  monthSpans.push({ name: new Date(startDate.getTime() + spanStart * 7 * 86400000).toLocaleString('en', { month: 'short' }), start: spanStart, span: totalCols - spanStart });
+  const lastD = new Date(startDate.getTime() + spanStart * 7 * 86400000);
+  const lastLabel = lastD.toLocaleString('en', { month: 'short' }) + (lastD.getFullYear() !== curYear || monthSpans.length === 0 ? " '" + String(lastD.getFullYear()).slice(2) : '');
+  monthSpans.push({ name: lastLabel, start: spanStart, span: totalCols - spanStart });
   const monthRow = monthSpans.map(m => `<span class="hm-month" style="grid-column:span ${m.span}">${m.name}</span>`).join('');
 
   // --- Day labels (all 7) ---
@@ -668,7 +920,7 @@ async function renderSettings() {
         <div class="field"><label>Roll Number</label><input value="${esc(u.roll_number)}" disabled></div>
         <div class="field"><label>Name</label><input id="pf-name" value="${esc(u.name)}"></div>
         <div class="field"><label>Email</label><input id="pf-email" type="email" value="${esc(u.email || '')}" placeholder="Optional"></div>
-        <div class="field"><label>Department</label><input value="${esc(u.department)}" disabled></div>
+        <div class="field"><label>Department</label><input id="pf-dept" value="${esc(u.department)}" ${u.role === 'admin' ? '' : 'disabled'}></div>
         <div class="field"><label>Role</label><input value="${esc(u.role)}" disabled></div>
         <div id="pf-msg" style="font-size:.85rem;min-height:20px;margin-bottom:8px"></div>
         <button class="btn btn-primary" id="save-profile-btn" style="width:auto;padding:8px 24px">Save Profile</button>
@@ -701,7 +953,7 @@ async function renderSettings() {
     try {
       const r = await api('/auth/me/profile', {
         method: 'PUT',
-        body: JSON.stringify({ name: document.getElementById('pf-name').value, email: document.getElementById('pf-email').value }),
+        body: JSON.stringify({ name: document.getElementById('pf-name').value, email: document.getElementById('pf-email').value, department: document.getElementById('pf-dept')?.value }),
       });
       if (!r.ok) { const d = await r.json(); msg.innerHTML = `<span style="color:var(--danger)">${esc(d.detail?.message || 'Failed')}</span>`; return; }
       state.user = await apiJson('/auth/me');
@@ -747,16 +999,45 @@ async function renderSettings() {
    ═══════════════════════════════════════════════════════════ */
 let currentSession = null;
 let isStreaming = false;
+let chatMode = 'ask'; // 'ask' or 'agent'
+
+function chatEmptyHtml() {
+  return `<div class="chat-empty">
+    <div class="chat-empty-hero">
+      <div class="mac-glitch-logo"><span class="glitch" data-text="MAC">MAC</span></div>
+      <div class="ctl-typewriter" id="ctl-typewriter"></div>
+    </div>
+  </div>`;
+}
+function startTypewriter() {
+  const el = document.getElementById('ctl-typewriter');
+  if (!el) return;
+  el.innerHTML = '';
+  const text = 'Cross the Limits';
+  let i = 0;
+  el.classList.add('typing');
+  function type() {
+    if (i < text.length) {
+      el.textContent += text[i];
+      i++;
+      setTimeout(type, 60 + Math.random() * 40);
+    } else {
+      el.classList.remove('typing');
+    }
+  }
+  setTimeout(type, 400);
+}
+function bindChatChips() {
+  startTypewriter();
+}
 
 function renderChat() {
   const el = document.getElementById('page-content');
-  el.style.padding = '0';
-  el.style.maxWidth = 'none';
-  el.style.height = 'calc(100vh - 57px)';
+  el.className = 'page page-chat';
 
   const sessions = getSessions();
   el.innerHTML = `
-    <div class="chat-layout" style="height:100%">
+    <div class="chat-layout">
       <div class="chat-sessions" id="chat-sidebar">
         <div class="chat-sessions-header">
           <h3>Sessions</h3>
@@ -766,29 +1047,36 @@ function renderChat() {
           ${sessions.map(s => sessionItem(s)).join('')}
         </div>
       </div>
+      <div class="chat-resize-handle" id="chat-resize-handle"></div>
       <div class="chat-main">
         <div class="chat-messages" id="chat-messages">
-          <div class="chat-empty">
-            <div class="logo"><span class="glitch" data-text="MAC">MAC</span></div>
-            <p>Start a conversation</p>
+          ${chatEmptyHtml()}
+        </div>
+        <div class="chat-input-wrap">
+          <div class="chat-input-box">
+            <textarea id="chat-input" placeholder="Ask MAC anything..." rows="1"></textarea>
+            <div class="chat-input-actions">
+              <div class="chat-input-left">
+                <select id="model-select" class="model-pill"><option value="auto" selected>Auto</option></select>
+                <div class="agent-toggle" id="agent-toggle">
+                  <span class="agent-mode-label active" data-mode="ask">Ask</span>
+                  <span class="agent-mode-label" data-mode="agent">Agent</span>
+                </div>
+              </div>
+              <div class="chat-input-right">
+                <span id="chat-status" class="chat-status-text"></span>
+                <span id="active-model-badge" class="active-model-badge"></span>
+                <button class="send-btn" id="send-btn" title="Send">
+                  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>
+                </button>
+              </div>
+            </div>
           </div>
-        </div>
-        <div class="chat-model-bar">
-          <span>Model:</span>
-          <select id="model-select">
-            <option value="auto" selected>Auto (Smart Route)</option>
-          </select>
-          <span id="chat-status" style="margin-left:auto"></span>
-        </div>
-        <div class="chat-input-bar">
-          <textarea id="chat-input" placeholder="Type a message..." rows="1"></textarea>
-          <button class="send-btn" id="send-btn">
-            <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor"><path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z"/></svg>
-          </button>
         </div>
       </div>
     </div>`;
   bindChat();
+  bindChatChips();
   if (sessions.length > 0 && !currentSession) loadSession(sessions[0].id);
 }
 
@@ -812,7 +1100,63 @@ function bindChat() {
     const item = e.target.closest('.session-item');
     if (item) loadSession(item.dataset.id);
   };
+  // Resizable session sidebar (VS Code style drag handle)
+  const handle = document.getElementById('chat-resize-handle');
+  const sidebar = document.getElementById('chat-sidebar');
+  if (handle && sidebar) {
+    let startX, startW;
+    handle.onmousedown = (e) => {
+      e.preventDefault();
+      startX = e.clientX;
+      startW = sidebar.getBoundingClientRect().width;
+      document.body.style.cursor = 'col-resize';
+      document.body.style.userSelect = 'none';
+      function onMove(ev) {
+        let w = startW + (ev.clientX - startX);
+        if (w < 60) w = 0; // snap to collapsed
+        else if (w < 140) w = 140; // minimum usable
+        else if (w > 500) w = 500; // max
+        sidebar.style.width = w + 'px';
+        sidebar.classList.toggle('collapsed', w === 0);
+        handle.classList.toggle('collapsed', w === 0);
+      }
+      function onUp() {
+        document.removeEventListener('mousemove', onMove);
+        document.removeEventListener('mouseup', onUp);
+        document.body.style.cursor = '';
+        document.body.style.userSelect = '';
+      }
+      document.addEventListener('mousemove', onMove);
+      document.addEventListener('mouseup', onUp);
+    };
+    // Double-click to toggle collapse/expand
+    handle.ondblclick = () => {
+      const w = sidebar.getBoundingClientRect().width;
+      if (w < 10) {
+        sidebar.style.width = '240px';
+        sidebar.classList.remove('collapsed');
+        handle.classList.remove('collapsed');
+      } else {
+        sidebar.style.width = '0px';
+        sidebar.classList.add('collapsed');
+        handle.classList.add('collapsed');
+      }
+    };
+  }
+  // Agent mode toggle
+  const agentToggle = document.getElementById('agent-toggle');
+  if (agentToggle) {
+    agentToggle.querySelectorAll('.agent-mode-label').forEach(lbl => {
+      lbl.onclick = () => {
+        agentToggle.querySelectorAll('.agent-mode-label').forEach(l => l.classList.remove('active'));
+        lbl.classList.add('active');
+        chatMode = lbl.dataset.mode;
+        document.getElementById('chat-input').placeholder = chatMode === 'agent' ? 'Describe a task for the agent...' : 'Type a message...';
+      };
+    });
+  }
   loadModelOptions();
+  loadActiveModelBadge();
 }
 
 async function loadModelOptions() {
@@ -829,6 +1173,23 @@ async function loadModelOptions() {
     });
   } catch (e) { /* API offline — auto option is enough */ }
   if (currentSession && currentSession.model) sel.value = currentSession.model;
+}
+
+async function loadActiveModelBadge() {
+  const badge = document.getElementById('active-model-badge');
+  if (!badge) return;
+  try {
+    const res = await fetch('/api/v1/explore/health');
+    if (!res.ok) { badge.innerHTML = '<span class="model-dot model-dot-off"></span> Offline'; return; }
+    const data = await res.json();
+    const models = (data.nodes || []).flatMap(n => n.models_loaded || []);
+    if (models.length > 0) {
+      badge.innerHTML = '<span class="model-dot model-dot-on"></span> ' + esc(shortModel(models[0]));
+      badge.title = 'Running: ' + models.join(', ');
+    } else {
+      badge.innerHTML = '<span class="model-dot model-dot-off"></span> No model';
+    }
+  } catch { badge.innerHTML = '<span class="model-dot model-dot-off"></span> Offline'; }
 }
 
 function newChat() {
@@ -849,7 +1210,8 @@ function loadSession(id) {
   document.querySelectorAll('.session-item').forEach(el => el.classList.toggle('active', el.dataset.id === id));
   const msgs = document.getElementById('chat-messages');
   if (s.messages.length === 0) {
-    msgs.innerHTML = `<div class="chat-empty"><div class="logo"><span class="glitch" data-text="MAC">MAC</span></div><p>Start a conversation</p></div>`;
+    msgs.innerHTML = chatEmptyHtml();
+    startTypewriter();
   } else {
     msgs.innerHTML = s.messages.map(m =>
       `<div class="msg msg-${m.role}">${m.role === 'assistant' ? formatMd(m.content) : esc(m.content)}</div>`
@@ -873,6 +1235,13 @@ async function sendMessage() {
   if (!currentSession) newChat();
   const model = document.getElementById('model-select').value;
   currentSession.model = model;
+
+  // Agent mode — delegate to agent runner
+  if (chatMode === 'agent') {
+    await sendAgentMessage(text);
+    return;
+  }
+
   currentSession.messages.push({ role: 'user', content: text });
   if (currentSession.title === 'New Chat') currentSession.title = text.slice(0, 40);
   persistSession();
@@ -885,9 +1254,10 @@ async function sendMessage() {
 
   const assistantDiv = document.createElement('div');
   assistantDiv.className = 'msg msg-assistant';
-  assistantDiv.innerHTML = '<div class="typing-indicator"><span></span><span></span><span></span></div>';
+  assistantDiv.innerHTML = macThinkingHTML();
   msgs.appendChild(assistantDiv);
   msgs.scrollTop = msgs.scrollHeight;
+  startMacThinking(assistantDiv);
 
   const status = document.getElementById('chat-status');
   status.textContent = 'Generating...';
@@ -899,6 +1269,7 @@ async function sendMessage() {
     if (!res.ok) { const err = await res.json(); throw new Error(err.detail?.message || 'Request failed'); }
 
     let fullContent = '';
+    stopMacThinking(assistantDiv);
     assistantDiv.textContent = '';
     const reader = res.body.getReader();
     const decoder = new TextDecoder();
@@ -929,7 +1300,8 @@ async function sendMessage() {
     if (fullContent) {
       currentSession.messages.push({ role: 'assistant', content: fullContent });
       persistSession();
-      assistantDiv.innerHTML = formatMd(fullContent);
+      const usedModel = model === 'auto' ? 'Qwen2.5-7B-AWQ' : shortModel(model);
+      assistantDiv.innerHTML = formatMd(fullContent) + `<div class="msg-model-tag">answered by ${esc(usedModel)}</div>`;
     } else if (streamError) {
       throw streamError;
     } else {
@@ -939,6 +1311,7 @@ async function sendMessage() {
       assistantDiv.innerHTML = formatMd(fullContent);
     }
   } catch (err) {
+    stopMacThinking(assistantDiv);
     assistantDiv.innerHTML = `<span style="color:var(--danger)">Error: ${esc(err.message)}</span>`;
     currentSession.messages.push({ role: 'assistant', content: `Error: ${err.message}` });
     persistSession();
@@ -955,6 +1328,107 @@ function persistSession() {
   const idx = sessions.findIndex(s => s.id === currentSession.id);
   if (idx >= 0) sessions[idx] = currentSession; else sessions.unshift(currentSession);
   saveSessions(sessions);
+}
+
+/* ═══════════════════════════════════════════════════════════
+   AGENT MODE — Plan-and-Execute with Streaming Steps
+   ═══════════════════════════════════════════════════════════ */
+async function sendAgentMessage(query) {
+  const input = document.getElementById('chat-input');
+  if (!currentSession) newChat();
+  currentSession.messages.push({ role: 'user', content: query });
+  if (currentSession.title === 'New Chat') currentSession.title = '[Agent] ' + query.slice(0, 35);
+  persistSession();
+
+  const msgs = document.getElementById('chat-messages');
+  const emptyEl = msgs.querySelector('.chat-empty');
+  if (emptyEl) emptyEl.remove();
+  msgs.innerHTML += `<div class="msg msg-user">${esc(query)}</div>`;
+  input.value = ''; input.style.height = 'auto';
+
+  const assistantDiv = document.createElement('div');
+  assistantDiv.className = 'msg msg-assistant';
+  assistantDiv.innerHTML = macThinkingHTML();
+  msgs.appendChild(assistantDiv);
+  msgs.scrollTop = msgs.scrollHeight;
+  startMacThinking(assistantDiv);
+
+  const status = document.getElementById('chat-status');
+  status.textContent = 'Agent working...';
+  isStreaming = true;
+
+  try {
+    const res = await api('/agent/run', { method: 'POST', body: JSON.stringify({ query }) });
+    if (!res.ok) { const err = await res.json(); throw new Error(err.detail?.message || 'Agent failed'); }
+
+    let stepsHtml = '';
+    let finalAnswer = '';
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split('\n');
+      buffer = lines.pop();
+      for (const line of lines) {
+        if (!line.startsWith('data: ')) continue;
+        const raw = line.slice(6).trim();
+        if (raw === '[DONE]') continue;
+        try {
+          const evt = JSON.parse(raw);
+          const evtType = evt.event || evt.type;
+          if (evtType === 'plan') {
+            stopMacThinking(assistantDiv);
+            const steps = evt.plan || evt.steps || [];
+            stepsHtml = '<div style="margin-bottom:12px;font-weight:700;font-size:.82rem">Plan:</div>';
+            steps.forEach((s, i) => {
+              const title = typeof s === 'string' ? s : (s.title || s.description || `Step ${i+1}`);
+              stepsHtml += `<div class="agent-step" id="agent-step-${i}"><div class="agent-step-title">Step ${i + 1}: ${esc(title)}</div></div>`;
+            });
+            assistantDiv.innerHTML = stepsHtml;
+          } else if (evtType === 'step_start') {
+            const si = (evt.step_index !== undefined ? evt.step_index : (evt.step ? evt.step - 1 : 0));
+            const stepEl = document.getElementById('agent-step-' + si);
+            if (stepEl) stepEl.classList.add('running');
+            status.textContent = 'Step ' + (si + 1) + '...';
+          } else if (evtType === 'step_complete' || evtType === 'step_result' || evtType === 'tool_result') {
+            const si = (evt.step_index !== undefined ? evt.step_index : (evt.step ? evt.step - 1 : 0));
+            const stepEl = document.getElementById('agent-step-' + si);
+            if (stepEl) {
+              stepEl.classList.remove('running');
+              stepEl.classList.add('done');
+              const output = evt.output || (evt.result && JSON.stringify(evt.result).slice(0, 500));
+              if (output) stepEl.innerHTML += `<div class="agent-step-output">${esc(String(output).slice(0, 500))}</div>`;
+            }
+          } else if (evtType === 'complete') {
+            finalAnswer = evt.response || evt.content || '';
+          } else if (evtType === 'answer') {
+            finalAnswer = evt.content || evt.response || '';
+          } else if (evtType === 'error') {
+            stopMacThinking(assistantDiv);
+            assistantDiv.innerHTML += `<div style="color:var(--danger);margin-top:8px;font-size:.85rem">Error: ${esc(evt.message || 'Unknown error')}</div>`;
+          }
+        } catch {}
+      }
+      msgs.scrollTop = msgs.scrollHeight;
+    }
+
+    if (finalAnswer) {
+      assistantDiv.innerHTML += `<div style="margin-top:16px;padding-top:12px;border-top:1px solid var(--border)">${formatMd(finalAnswer)}</div>`;
+      currentSession.messages.push({ role: 'assistant', content: finalAnswer });
+      persistSession();
+    }
+  } catch (ex) {
+    stopMacThinking(assistantDiv);
+    assistantDiv.innerHTML = `<div style="color:var(--danger)">Agent error: ${esc(ex.message)}</div>`;
+  }
+
+  status.textContent = '';
+  isStreaming = false;
+  msgs.scrollTop = msgs.scrollHeight;
 }
 
 /* ═══════════════════════════════════════════════════════════
@@ -990,6 +1464,18 @@ async function renderAdmin() {
         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/></svg>
         <span>Registry</span>
       </div>
+      <div class="admin-tab ${adminTab==='cluster'?'active':''}" data-tab="cluster">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="2" width="20" height="8" rx="2" ry="2"/><rect x="2" y="14" width="20" height="8" rx="2" ry="2"/><line x1="6" y1="6" x2="6.01" y2="6"/><line x1="6" y1="18" x2="6.01" y2="18"/></svg>
+        <span>Cluster</span>
+      </div>
+      <div class="admin-tab ${adminTab==='scoped_keys'?'active':''}" data-tab="scoped_keys">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><path d="M12 8v4"/><path d="M12 16h.01"/></svg>
+        <span>Scoped Keys</span>
+      </div>
+      <div class="admin-tab ${adminTab==='audit'?'active':''}" data-tab="audit">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/><path d="M16 13H8"/><path d="M16 17H8"/><path d="M10 9H8"/></svg>
+        <span>Audit Log</span>
+      </div>
     </div>
     <div id="admin-content"><div class="loading-state"><div class="spinner"></div><span>Loading...</span></div></div>
   `;
@@ -1001,6 +1487,9 @@ async function renderAdmin() {
   else if (adminTab === 'keys') await renderAdminKeys();
   else if (adminTab === 'models') await renderAdminModels();
   else if (adminTab === 'registry') await renderAdminRegistry();
+  else if (adminTab === 'cluster') await renderAdminCluster();
+  else if (adminTab === 'scoped_keys') await renderAdminScopedKeys();
+  else if (adminTab === 'audit') await renderAdminAuditLog();
 }
 
 async function renderAdminOverview() {
@@ -1177,6 +1666,7 @@ async function renderAdminUsers() {
               <td class="muted">${new Date(u.created_at).toLocaleDateString()}</td>
               <td>
                 <div class="action-btns">
+                  <button class="icon-btn edit-user" data-uid="${u.id}" data-name="${esc(u.name)}" data-email="${esc(u.email||'')}" data-dept="${esc(u.department)}" data-role="${u.role}" title="Edit user"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg></button>
                   <select class="role-select" data-uid="${u.id}" title="Change role">
                     <option value="student" ${u.role==='student'?'selected':''}>Student</option>
                     <option value="faculty" ${u.role==='faculty'?'selected':''}>Faculty</option>
@@ -1197,6 +1687,9 @@ async function renderAdminUsers() {
 
     el.querySelectorAll('.role-select').forEach(sel => {
       sel.onchange = async () => { try { await api(`/auth/admin/users/${sel.dataset.uid}/role`, { method: 'PUT', body: JSON.stringify({ role: sel.value }) }); renderAdmin(); } catch { alert('Failed'); } };
+    });
+    el.querySelectorAll('.edit-user').forEach(btn => {
+      btn.onclick = () => showEditUserModal(btn.dataset.uid, btn.dataset.name, btn.dataset.email, btn.dataset.dept, btn.dataset.role);
     });
     el.querySelectorAll('.toggle-status').forEach(btn => {
       btn.onclick = async () => { try { await api(`/auth/admin/users/${btn.dataset.uid}/status`, { method: 'PUT', body: JSON.stringify({ is_active: btn.dataset.active !== 'true' }) }); renderAdmin(); } catch { alert('Failed'); } };
@@ -1285,6 +1778,47 @@ async function renderAdminModels() {
         }).join('')}
       </div>`;
   } catch (ex) { el.innerHTML = `<div class="error-state"><p>Error: ${esc(ex.message)}</p></div>`; }
+}
+
+function showEditUserModal(uid, name, email, dept, role) {
+  const overlay = document.createElement('div');
+  overlay.className = 'modal-overlay';
+  overlay.innerHTML = `
+    <div class="modal">
+      <h3>Edit User</h3>
+      <div class="field"><label>Name</label><input type="text" id="eu-name" value="${esc(name)}"></div>
+      <div class="field"><label>Email</label><input type="email" id="eu-email" value="${esc(email)}"></div>
+      <div class="field"><label>Department</label>
+        <select id="eu-dept"><option${dept==='CSE'?' selected':''}>CSE</option><option${dept==='ECE'?' selected':''}>ECE</option><option${dept==='ME'?' selected':''}>ME</option><option${dept==='CE'?' selected':''}>CE</option><option${dept==='EE'?' selected':''}>EE</option><option${dept==='IT'?' selected':''}>IT</option><option${dept==='Other'?' selected':''}>Other</option></select>
+      </div>
+      <div class="field"><label>Role</label>
+        <select id="eu-role"><option value="student"${role==='student'?' selected':''}>Student</option><option value="faculty"${role==='faculty'?' selected':''}>Faculty</option><option value="admin"${role==='admin'?' selected':''}>Admin</option></select>
+      </div>
+      <div id="eu-error" style="color:var(--danger);font-size:.85rem;min-height:20px"></div>
+      <div class="modal-actions">
+        <button class="btn btn-sm btn-outline" id="eu-cancel">Cancel</button>
+        <button class="btn btn-sm btn-primary" id="eu-submit" style="width:auto;padding:8px 20px">Save</button>
+      </div>
+    </div>`;
+  document.body.appendChild(overlay);
+  overlay.querySelector('#eu-cancel').onclick = () => overlay.remove();
+  overlay.onclick = (e) => { if (e.target === overlay) overlay.remove(); };
+  overlay.querySelector('#eu-submit').onclick = async () => {
+    const err = overlay.querySelector('#eu-error');
+    err.textContent = '';
+    const body = {
+      name: overlay.querySelector('#eu-name').value.trim(),
+      email: overlay.querySelector('#eu-email').value.trim() || null,
+      department: overlay.querySelector('#eu-dept').value,
+      role: overlay.querySelector('#eu-role').value,
+    };
+    if (!body.name) { err.textContent = 'Name is required'; return; }
+    try {
+      const r = await api(`/auth/admin/users/${uid}`, { method: 'PUT', body: JSON.stringify(body) });
+      if (!r.ok) { const d = await r.json(); err.textContent = d.detail?.message || 'Failed'; return; }
+      overlay.remove(); renderAdmin();
+    } catch (ex) { err.textContent = ex.message; }
+  };
 }
 
 function showAddUserModal() {
@@ -1446,6 +1980,628 @@ async function renderAdminRegistry() {
 }
 
 /* ═══════════════════════════════════════════════════════════
+   ADMIN — Cluster / Nodes Management
+   ═══════════════════════════════════════════════════════════ */
+async function renderAdminCluster() {
+  const el = document.getElementById('admin-content');
+  try {
+    const data = await apiJson('/nodes');
+    const nodes = data.nodes || [];
+    el.innerHTML = `
+      <div class="admin-header">
+        <h2>GPU Cluster <span class="badge" style="background:#eee;color:#000;font-size:.75rem;vertical-align:middle">${nodes.length} nodes</span></h2>
+        <button class="btn btn-sm btn-primary" id="gen-enroll-token" style="width:auto;padding:8px 16px">+ Enrollment Token</button>
+      </div>
+      <div class="nodes-grid">
+        ${nodes.length === 0 ? '<div class="empty-state"><p>No worker nodes enrolled yet. Generate an enrollment token to add GPU workers.</p></div>' : nodes.map(n => `
+          <div class="node-card">
+            <div class="node-card-header">
+              <span class="node-name">${esc(n.name)}</span>
+              <span class="node-status ${n.status === 'online' ? 'online' : n.status === 'draining' ? 'draining' : 'offline'}">${esc(n.status)}</span>
+            </div>
+            <div style="font-size:.75rem;color:var(--muted);margin-bottom:8px">${esc(n.ip_address || '')}:${n.port || ''} · ${esc(n.gpu_name || 'Unknown GPU')} · ${n.gpu_vram_mb ? Math.round(n.gpu_vram_mb/1024) + 'GB VRAM' : ''}</div>
+            <div class="node-metrics">
+              <div class="node-metric"><span class="metric-val">${n.gpu_util_pct != null ? n.gpu_util_pct + '%' : '--'}</span><span class="metric-lbl">GPU</span></div>
+              <div class="node-metric"><span class="metric-val">${n.cpu_util_pct != null ? n.cpu_util_pct + '%' : '--'}</span><span class="metric-lbl">CPU</span></div>
+              <div class="node-metric"><span class="metric-val">${n.ram_used_mb && n.ram_total_mb ? Math.round(n.ram_used_mb/n.ram_total_mb*100) + '%' : '--'}</span><span class="metric-lbl">RAM</span></div>
+              <div class="node-metric"><span class="metric-val">${n.gpu_vram_used_mb && n.gpu_vram_mb ? Math.round(n.gpu_vram_used_mb/n.gpu_vram_mb*100) + '%' : '--'}</span><span class="metric-lbl">VRAM</span></div>
+            </div>
+            <div style="margin-top:12px;display:flex;gap:6px">
+              ${n.status === 'online' ? `<button class="btn btn-sm btn-outline drain-node" data-id="${n.id}">Drain</button>` : ''}
+              ${n.status === 'draining' || n.status === 'offline' ? `<button class="btn btn-sm btn-outline activate-node" data-id="${n.id}">Activate</button>` : ''}
+              <button class="btn btn-sm btn-danger-outline remove-node" data-id="${n.id}">Remove</button>
+            </div>
+          </div>
+        `).join('')}
+      </div>`;
+
+    document.getElementById('gen-enroll-token').onclick = async () => {
+      const label = prompt('Label for this token (e.g. "PC3-GPU"):');
+      if (!label) return;
+      try {
+        const r = await apiJson('/nodes/enrollment-token', { method: 'POST', body: JSON.stringify({ label, expires_in_hours: 24 }) });
+        alert('Enrollment Token (use within 24h):\\n\\n' + r.token + '\\n\\nLabel: ' + r.label);
+      } catch (ex) { alert('Failed: ' + ex.message); }
+    };
+    el.querySelectorAll('.drain-node').forEach(btn => {
+      btn.onclick = async () => { try { await api('/nodes/' + btn.dataset.id + '/drain', { method: 'POST' }); renderAdmin(); } catch { alert('Failed'); } };
+    });
+    el.querySelectorAll('.activate-node').forEach(btn => {
+      btn.onclick = async () => { try { await api('/nodes/' + btn.dataset.id + '/activate', { method: 'POST' }); renderAdmin(); } catch { alert('Failed'); } };
+    });
+    el.querySelectorAll('.remove-node').forEach(btn => {
+      btn.onclick = async () => { if (!confirm('Remove this node?')) return; try { await api('/nodes/' + btn.dataset.id, { method: 'DELETE' }); renderAdmin(); } catch { alert('Failed'); } };
+    });
+  } catch (ex) { el.innerHTML = `<div class="error-state"><p>Error: ${esc(ex.message)}</p></div>`; }
+}
+
+/* ═══════════════════════════════════════════════════════════
+   ADMIN — Scoped API Keys
+   ═══════════════════════════════════════════════════════════ */
+async function renderAdminScopedKeys() {
+  const el = document.getElementById('admin-content');
+  try {
+    const data = await apiJson('/scoped-keys/admin/all');
+    const keys = data.keys || [];
+    el.innerHTML = `
+      <div class="admin-header">
+        <h2>Scoped API Keys <span class="badge" style="background:#eee;color:#000;font-size:.75rem;vertical-align:middle">${keys.length}</span></h2>
+      </div>
+      ${keys.length === 0 ? '<div class="empty-state"><p>No scoped API keys created yet</p></div>' : `
+      <div class="table-responsive">
+      <table class="data-table">
+        <thead><tr><th>Owner</th><th>Name</th><th>Models</th><th>Req/hr</th><th>Tok/day</th><th>Usage</th><th>Expires</th><th>Actions</th></tr></thead>
+        <tbody>
+          ${keys.map(k => `
+            <tr>
+              <td class="mono bold">${esc(k.user_roll || k.user_id)}</td>
+              <td>${esc(k.name)}</td>
+              <td>${(k.allowed_models || []).map(m => '<span class="model-tag">' + esc(m) + '</span>').join(' ') || '<span class="muted">All</span>'}</td>
+              <td>${k.requests_per_hour || '∞'}</td>
+              <td>${fmtNum(k.tokens_per_day || 0)}</td>
+              <td>${fmtNum(k.total_requests || 0)} req / ${fmtNum(k.total_tokens || 0)} tok</td>
+              <td class="muted">${k.expires_at ? new Date(k.expires_at).toLocaleDateString() : 'Never'}</td>
+              <td><button class="btn btn-sm btn-danger-outline revoke-scoped" data-id="${k.id}">Revoke</button></td>
+            </tr>
+          `).join('')}
+        </tbody>
+      </table>
+      </div>`}`;
+
+    el.querySelectorAll('.revoke-scoped').forEach(btn => {
+      btn.onclick = async () => {
+        if (!confirm('Revoke this scoped key?')) return;
+        try { await api('/scoped-keys/admin/' + btn.dataset.id, { method: 'DELETE' }); renderAdmin(); } catch { alert('Failed'); }
+      };
+    });
+  } catch (ex) { el.innerHTML = `<div class="error-state"><p>Error: ${esc(ex.message)}</p></div>`; }
+}
+
+/* ═══════════════════════════════════════════════════════════
+   ADMIN — Audit Log
+   ═══════════════════════════════════════════════════════════ */
+async function renderAdminAuditLog() {
+  const el = document.getElementById('admin-content');
+  try {
+    const data = await apiJson('/notifications/audit-logs?per_page=100');
+    const logs = data.logs || [];
+    el.innerHTML = `
+      <div class="admin-header">
+        <h2>Audit Log <span class="badge" style="background:#eee;color:#000;font-size:.75rem;vertical-align:middle">${logs.length}</span></h2>
+      </div>
+      ${logs.length === 0 ? '<div class="empty-state"><p>No audit events recorded yet</p></div>' : `
+      <div class="table-responsive">
+      <table class="data-table">
+        <thead><tr><th>Time</th><th>Actor</th><th>Action</th><th>Resource</th><th>Details</th><th>IP</th></tr></thead>
+        <tbody>
+          ${logs.map(l => `
+            <tr>
+              <td class="muted" style="white-space:nowrap">${timeAgo(l.created_at)}</td>
+              <td class="mono">${esc(l.actor_roll || l.actor_id || 'system')}</td>
+              <td><span class="audit-action">${esc(l.action)}</span></td>
+              <td><span class="muted">${esc(l.resource_type || '')}${l.resource_id ? '#' + l.resource_id : ''}</span></td>
+              <td style="max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(l.details || '')}">${esc((l.details || '').slice(0, 80))}</td>
+              <td class="mono muted">${esc(l.ip_address || '-')}</td>
+            </tr>
+          `).join('')}
+        </tbody>
+      </table>
+      </div>`}`;
+  } catch (ex) { el.innerHTML = `<div class="error-state"><p>Error: ${esc(ex.message)}</p></div>`; }
+}
+
+/* ═══════════════════════════════════════════════════════════
+   DOUBTS PAGE — Student Questions to Faculty
+   ═══════════════════════════════════════════════════════════ */
+let doubtView = 'list';
+let doubtDetailId = null;
+let doubtFilter = 'all';
+
+async function renderDoubts() {
+  const el = document.getElementById('page-content');
+  if (doubtView === 'detail' && doubtDetailId) {
+    await renderDoubtDetail(el, doubtDetailId);
+    return;
+  }
+  el.innerHTML = '<div class="loading-state"><div class="spinner"></div><span>Loading doubts...</span></div>';
+  try {
+    const u = state.user || {};
+    const isFacultyOrAdmin = u.role === 'faculty' || u.role === 'admin';
+    let endpoint = isFacultyOrAdmin ? '/doubts/all' : '/doubts/my';
+    if (doubtFilter !== 'all') endpoint += '?status=' + doubtFilter;
+    const data = await apiJson(endpoint);
+    const doubts = data.doubts || [];
+
+    el.innerHTML = `
+      <div class="admin-header">
+        <h2>Doubts & Questions</h2>
+        <button class="btn btn-sm btn-primary" id="new-doubt-btn" style="width:auto;padding:8px 16px">+ Ask Question</button>
+      </div>
+      <div class="doubt-filters">
+        <select id="doubt-filter-status">
+          <option value="all" ${doubtFilter==='all'?'selected':''}>All Status</option>
+          <option value="open" ${doubtFilter==='open'?'selected':''}>Open</option>
+          <option value="answered" ${doubtFilter==='answered'?'selected':''}>Answered</option>
+          <option value="closed" ${doubtFilter==='closed'?'selected':''}>Closed</option>
+        </select>
+      </div>
+      ${doubts.length === 0 ? '<div class="empty-state"><p>No doubts found. Ask a question to get started!</p></div>' :
+        doubts.map(d => `
+          <div class="doubt-card" data-doubt-id="${d.id}">
+            <div class="doubt-card-header">
+              <span class="doubt-title">${esc(d.title)}</span>
+              <span class="doubt-status ${d.status}">${esc(d.status)}</span>
+            </div>
+            <div class="doubt-meta">
+              <span>${esc(d.department || '')}${d.subject ? ' · ' + esc(d.subject) : ''}</span>
+              <span>${d.is_anonymous ? 'Anonymous' : esc(d.student_name || '')}</span>
+              <span>${timeAgo(d.created_at)}</span>
+              ${d.reply_count ? '<span>' + d.reply_count + ' replies</span>' : ''}
+            </div>
+            <div class="doubt-body-preview">${esc((d.body || '').slice(0, 200))}</div>
+          </div>
+        `).join('')}`;
+
+    document.getElementById('doubt-filter-status').onchange = (e) => { doubtFilter = e.target.value; renderDoubts(); };
+    el.querySelectorAll('.doubt-card').forEach(card => {
+      card.onclick = () => { doubtDetailId = card.dataset.doubtId; doubtView = 'detail'; renderDoubts(); };
+    });
+    document.getElementById('new-doubt-btn').onclick = showNewDoubtModal;
+  } catch (ex) { el.innerHTML = `<div class="error-state"><p>Error: ${esc(ex.message)}</p></div>`; }
+}
+
+async function renderDoubtDetail(el, id) {
+  el.innerHTML = '<div class="loading-state"><div class="spinner"></div><span>Loading...</span></div>';
+  try {
+    const data = await apiJson('/doubts/' + id);
+    const d = data.doubt || data;
+    const replies = data.replies || [];
+    const u = state.user || {};
+    const canReply = u.role === 'faculty' || u.role === 'admin' || u.id === d.student_id;
+    el.innerHTML = `
+      <div class="doubt-detail-panel">
+        <button class="btn btn-sm btn-outline" id="doubt-back" style="margin-bottom:16px">← Back to list</button>
+        <div class="doubt-card-header">
+          <span class="doubt-title" style="font-size:1.1rem">${esc(d.title)}</span>
+          <span class="doubt-status ${d.status}">${esc(d.status)}</span>
+        </div>
+        <div class="doubt-meta" style="margin:8px 0 16px">
+          <span>${esc(d.department || '')}${d.subject ? ' · ' + esc(d.subject) : ''}</span>
+          <span>${d.is_anonymous ? 'Anonymous' : esc(d.student_name || '')}</span>
+          <span>${timeAgo(d.created_at)}</span>
+        </div>
+        <div style="font-size:.9rem;line-height:1.7;padding:16px;background:var(--card);border:1px solid var(--border);border-radius:var(--radius)">${formatMd(d.body || '')}</div>
+        <div class="doubt-replies">
+          <h3 style="font-size:.9rem;font-weight:700;margin-bottom:12px">Replies (${replies.length})</h3>
+          ${replies.length === 0 ? '<div class="empty-state"><p>No replies yet</p></div>' :
+            replies.map(r => `
+              <div class="doubt-reply">
+                <div class="reply-author">${esc(r.author_name || 'Unknown')} <span class="badge badge-${r.author_role || 'student'}">${esc(r.author_role || '')}</span></div>
+                <div class="reply-body">${formatMd(r.body || '')}</div>
+                <div class="reply-time">${timeAgo(r.created_at)}</div>
+              </div>
+            `).join('')}
+          ${canReply ? `
+          <div class="doubt-compose">
+            <textarea id="doubt-reply-text" placeholder="Write your reply..." rows="3"></textarea>
+            <button class="btn btn-sm btn-primary" id="doubt-reply-btn" style="width:auto;padding:8px 20px;margin-top:8px">Send Reply</button>
+          </div>` : ''}
+        </div>
+      </div>`;
+
+    document.getElementById('doubt-back').onclick = () => { doubtView = 'list'; doubtDetailId = null; renderDoubts(); };
+    const replyBtn = document.getElementById('doubt-reply-btn');
+    if (replyBtn) {
+      replyBtn.onclick = async () => {
+        const text = document.getElementById('doubt-reply-text').value.trim();
+        if (!text) return;
+        try {
+          await api('/doubts/' + id + '/reply', { method: 'POST', body: JSON.stringify({ body: text }) });
+          renderDoubtDetail(el, id);
+        } catch (ex) { alert('Failed: ' + ex.message); }
+      };
+    }
+  } catch (ex) { el.innerHTML = `<div class="error-state"><p>Error: ${esc(ex.message)}</p></div>`; }
+}
+
+function showNewDoubtModal() {
+  const u = state.user || {};
+  const overlay = document.createElement('div');
+  overlay.className = 'modal-overlay';
+  overlay.innerHTML = `
+    <div class="modal">
+      <h3>Ask a Question</h3>
+      <div class="field"><label>Title</label><input type="text" id="dbt-title" placeholder="Brief title for your question"></div>
+      <div class="field"><label>Department</label>
+        <select id="dbt-dept"><option>CSE</option><option>ECE</option><option>ME</option><option>CE</option><option>EE</option><option>Other</option></select>
+      </div>
+      <div class="field"><label>Subject (optional)</label><input type="text" id="dbt-subject" placeholder="e.g. Data Structures"></div>
+      <div class="field"><label>Your Question</label><textarea id="dbt-body" rows="5" placeholder="Describe your doubt in detail..."></textarea></div>
+      <div class="field"><label><input type="checkbox" id="dbt-anon" style="width:auto;margin-right:6px">Post anonymously</label></div>
+      <div id="dbt-error" style="color:var(--danger);font-size:.85rem;min-height:20px"></div>
+      <div class="modal-actions">
+        <button class="btn btn-sm btn-outline" id="dbt-cancel">Cancel</button>
+        <button class="btn btn-sm btn-primary" id="dbt-submit" style="width:auto;padding:8px 20px">Submit</button>
+      </div>
+    </div>`;
+  document.body.appendChild(overlay);
+  overlay.querySelector('#dbt-cancel').onclick = () => overlay.remove();
+  overlay.onclick = (e) => { if (e.target === overlay) overlay.remove(); };
+  overlay.querySelector('#dbt-submit').onclick = async () => {
+    const err = overlay.querySelector('#dbt-error');
+    err.textContent = '';
+    const body = {
+      title: overlay.querySelector('#dbt-title').value.trim(),
+      body: overlay.querySelector('#dbt-body').value.trim(),
+      department: overlay.querySelector('#dbt-dept').value,
+      subject: overlay.querySelector('#dbt-subject').value.trim() || null,
+      is_anonymous: overlay.querySelector('#dbt-anon').checked,
+    };
+    if (!body.title || !body.body) { err.textContent = 'Title and question are required'; return; }
+    try {
+      const r = await api('/doubts', { method: 'POST', body: JSON.stringify(body) });
+      if (!r.ok) { const d = await r.json(); err.textContent = d.detail?.message || 'Failed'; return; }
+      overlay.remove();
+      renderDoubts();
+    } catch (ex) { err.textContent = ex.message; }
+  };
+}
+
+/* ═══════════════════════════════════════════════════════════
+   ATTENDANCE PAGE — Faculty/Admin Session Management
+   ═══════════════════════════════════════════════════════════ */
+async function renderAttendance() {
+  const el = document.getElementById('page-content');
+  el.innerHTML = '<div class="loading-state"><div class="spinner"></div><span>Loading attendance...</span></div>';
+  try {
+    const data = await apiJson('/attendance/sessions');
+    const sessions = data.sessions || [];
+    el.innerHTML = `
+      <div class="admin-header">
+        <h2>Attendance Sessions</h2>
+        <button class="btn btn-sm btn-primary" id="new-attd-btn" style="width:auto;padding:8px 16px">+ New Session</button>
+      </div>
+      ${sessions.length === 0 ? '<div class="empty-state"><p>No attendance sessions yet. Create one to start tracking.</p></div>' :
+        sessions.map(s => `
+          <div class="attendance-session-card">
+            <div class="attd-info">
+              <div class="attd-title">${esc(s.title)}</div>
+              <div class="attd-sub">${esc(s.department || '')}${s.subject ? ' · ' + esc(s.subject) : ''} · ${new Date(s.session_date).toLocaleDateString()}</div>
+            </div>
+            <span class="attd-badge ${s.is_open ? 'live' : 'closed'}">${s.is_open ? 'LIVE' : 'CLOSED'}</span>
+            <div style="display:flex;gap:6px">
+              ${s.is_open ? `<button class="btn btn-sm btn-outline close-session" data-id="${s.id}">Close</button>` : ''}
+              <button class="btn btn-sm btn-outline view-report" data-id="${s.id}">Report</button>
+            </div>
+          </div>
+        `).join('')}`;
+
+    document.getElementById('new-attd-btn').onclick = () => {
+      const overlay = document.createElement('div');
+      overlay.className = 'modal-overlay';
+      overlay.innerHTML = `
+        <div class="modal">
+          <h3>New Attendance Session</h3>
+          <div class="field"><label>Title</label><input id="attd-title" placeholder="e.g. DSA Lab - Section A"></div>
+          <div class="field"><label>Department</label>
+            <select id="attd-dept"><option>CSE</option><option>ECE</option><option>ME</option><option>CE</option><option>EE</option><option>IT</option></select>
+          </div>
+          <div class="field"><label>Subject</label>
+            <select id="attd-subject"><option value="AI">AI</option><option value="CSE">CSE</option><option value="IT">IT</option><option value="">Other</option></select>
+          </div>
+          <div id="attd-error" style="color:var(--danger);font-size:.85rem;min-height:20px"></div>
+          <div class="modal-actions">
+            <button class="btn btn-sm btn-outline" id="attd-cancel">Cancel</button>
+            <button class="btn btn-sm btn-primary" id="attd-submit" style="width:auto;padding:8px 20px">Create</button>
+          </div>
+        </div>`;
+      document.body.appendChild(overlay);
+      overlay.querySelector('#attd-cancel').onclick = () => overlay.remove();
+      overlay.onclick = (e) => { if (e.target === overlay) overlay.remove(); };
+      overlay.querySelector('#attd-submit').onclick = async () => {
+        const err = overlay.querySelector('#attd-error');
+        err.textContent = '';
+        // Check time — attendance only allowed 12:00 AM to 12:00 PM
+        const now = new Date();
+        const hour = now.getHours();
+        if (hour >= 12) {
+          err.textContent = 'Attendance sessions can only be created before 12:00 PM (noon)';
+          return;
+        }
+        const body = {
+          title: overlay.querySelector('#attd-title').value.trim(),
+          department: overlay.querySelector('#attd-dept').value,
+          subject: overlay.querySelector('#attd-subject').value || null,
+          session_date: new Date().toISOString().slice(0, 10),
+        };
+        if (!body.title) { err.textContent = 'Title is required'; return; }
+        try {
+          const r = await api('/attendance/sessions', { method: 'POST', body: JSON.stringify(body) });
+          if (!r.ok) { const d = await r.json(); err.textContent = (typeof d.detail === 'string' ? d.detail : d.detail?.message) || 'Failed'; return; }
+          overlay.remove();
+          renderAttendance();
+        } catch (ex) { err.textContent = ex.message; }
+      };
+    };
+
+    el.querySelectorAll('.close-session').forEach(btn => {
+      btn.onclick = async () => {
+        try { await api('/attendance/sessions/' + btn.dataset.id + '/close', { method: 'POST' }); renderAttendance(); } catch { alert('Failed'); }
+      };
+    });
+    el.querySelectorAll('.view-report').forEach(btn => {
+      btn.onclick = async () => {
+        try {
+          const data = await apiJson('/attendance/sessions/' + btn.dataset.id + '/report');
+          const records = data.records || [];
+          const overlay = document.createElement('div');
+          overlay.className = 'modal-overlay';
+          overlay.innerHTML = `
+            <div class="modal" style="max-width:600px">
+              <h3>Attendance Report</h3>
+              ${records.length === 0 ? '<p class="muted">No attendance records.</p>' : `
+              <div class="table-responsive">
+              <table class="data-table">
+                <thead><tr><th>Roll No</th><th>Name</th><th>Verified</th><th>Confidence</th><th>Time</th></tr></thead>
+                <tbody>
+                  ${records.map(r => `
+                    <tr>
+                      <td class="mono bold">${esc(r.roll_number || '')}</td>
+                      <td>${esc(r.name || '')}</td>
+                      <td>${r.face_verified ? '<span class="dot-success"></span> Yes' : '<span class="dot-error"></span> No'}</td>
+                      <td>${r.face_match_confidence ? (r.face_match_confidence * 100).toFixed(0) + '%' : '-'}</td>
+                      <td class="muted">${r.created_at ? timeAgo(r.created_at) : '-'}</td>
+                    </tr>
+                  `).join('')}
+                </tbody>
+              </table>
+              </div>`}
+              <div class="modal-actions"><button class="btn btn-sm btn-outline" onclick="this.closest('.modal-overlay').remove()">Close</button></div>
+            </div>`;
+          document.body.appendChild(overlay);
+          overlay.onclick = (e) => { if (e.target === overlay) overlay.remove(); };
+        } catch (ex) { alert('Failed: ' + ex.message); }
+      };
+    });
+  } catch (ex) { el.innerHTML = `<div class="error-state"><p>Error: ${esc(ex.message)}</p></div>`; }
+}
+
+/* ═══════════════════════════════════════════════════════════
+   COPY CHECK — Plagiarism checker using vision model
+   ═══════════════════════════════════════════════════════════ */
+async function renderCopyCheck() {
+  const el = document.getElementById('page-content');
+  el.className = 'page';
+  el.innerHTML = `
+    <div class="copycheck-page">
+      <div class="copycheck-header">
+        <h2>Copy Check</h2>
+        <p class="muted">Upload answer sheets or documents to check for similarities using AI vision analysis.</p>
+      </div>
+      <div class="copycheck-upload-area" id="cc-drop-zone">
+        <div class="cc-drop-content">
+          <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+          <p>Drag & drop images here or <label class="cc-browse" for="cc-file-input">browse</label></p>
+          <p class="muted" style="font-size:.75rem">Supports JPG, PNG, PDF — up to 10 files at once</p>
+          <input type="file" id="cc-file-input" multiple accept="image/*,.pdf" style="display:none">
+        </div>
+      </div>
+      <div class="cc-files" id="cc-file-list"></div>
+      <div class="cc-actions" id="cc-actions" style="display:none">
+        <button class="btn btn-primary" id="cc-analyze-btn">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+          Analyze for Copies
+        </button>
+        <button class="btn btn-outline btn-sm" id="cc-clear-btn">Clear All</button>
+      </div>
+      <div id="cc-results"></div>
+    </div>`;
+  bindCopyCheck();
+}
+
+function bindCopyCheck() {
+  const dropZone = document.getElementById('cc-drop-zone');
+  const fileInput = document.getElementById('cc-file-input');
+  const fileList = document.getElementById('cc-file-list');
+  const actions = document.getElementById('cc-actions');
+  const results = document.getElementById('cc-results');
+  let files = [];
+
+  function renderFileList() {
+    if (files.length === 0) { fileList.innerHTML = ''; actions.style.display = 'none'; return; }
+    actions.style.display = 'flex';
+    fileList.innerHTML = files.map((f, i) => `
+      <div class="cc-file-item">
+        <div class="cc-file-thumb">${f.type.startsWith('image/') ? `<img src="${URL.createObjectURL(f)}" alt="">` : '<svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>'}</div>
+        <div class="cc-file-info">
+          <span class="cc-file-name">${esc(f.name)}</span>
+          <span class="cc-file-size">${(f.size / 1024).toFixed(1)} KB</span>
+        </div>
+        <button class="icon-btn cc-file-remove" data-idx="${i}" title="Remove">&times;</button>
+      </div>
+    `).join('');
+    fileList.querySelectorAll('.cc-file-remove').forEach(btn => {
+      btn.onclick = () => { files.splice(+btn.dataset.idx, 1); renderFileList(); };
+    });
+  }
+
+  function addFiles(newFiles) {
+    for (const f of newFiles) {
+      if (files.length >= 10) break;
+      files.push(f);
+    }
+    renderFileList();
+  }
+
+  dropZone.ondragover = (e) => { e.preventDefault(); dropZone.classList.add('dragover'); };
+  dropZone.ondragleave = () => dropZone.classList.remove('dragover');
+  dropZone.ondrop = (e) => { e.preventDefault(); dropZone.classList.remove('dragover'); addFiles(e.dataTransfer.files); };
+  fileInput.onchange = () => { addFiles(fileInput.files); fileInput.value = ''; };
+
+  document.getElementById('cc-clear-btn').onclick = () => { files = []; renderFileList(); results.innerHTML = ''; };
+  document.getElementById('cc-analyze-btn').onclick = async () => {
+    if (files.length < 2) { alert('Upload at least 2 documents to compare.'); return; }
+    results.innerHTML = `<div class="mac-thinking"><div class="mac-think-orb"><div class="mac-think-ring"></div><div class="mac-think-ring r2"></div><div class="mac-think-ring r3"></div><div class="mac-think-letters"><span class="mac-tl">M</span><span class="mac-tl">A</span><span class="mac-tl">C</span></div></div><div class="mac-think-label">Analyzing documents for similarities...</div></div>`;
+    // Animate thinking letters
+    const tls = results.querySelectorAll('.mac-tl');
+    let litIdx = 0;
+    const litIv = setInterval(() => { tls.forEach((t,i) => t.classList.toggle('lit', i === litIdx)); litIdx = (litIdx + 1) % tls.length; }, 400);
+    try {
+      // Convert files to base64, send to LLM for vision analysis
+      const images = [];
+      for (const f of files) {
+        if (f.type.startsWith('image/')) {
+          const b64 = await fileToBase64(f);
+          images.push({ name: f.name, data: b64, type: f.type });
+        }
+      }
+      if (images.length < 2) {
+        clearInterval(litIv);
+        results.innerHTML = '<div class="cc-result-card error"><p>Need at least 2 image files for comparison.</p></div>';
+        return;
+      }
+      const content = [
+        { type: 'text', text: 'You are a plagiarism detection expert. Compare these answer sheets / documents carefully. For each pair of documents, identify: 1) Percentage of similarity 2) Specific copied sections 3) Whether copying is confirmed, suspected, or unlikely. Give a detailed structured report. Focus on handwriting similarity, identical answers, same mistakes, and identical phrasing.' },
+      ];
+      images.forEach(img => {
+        content.push({ type: 'text', text: `Document: ${img.name}` });
+        content.push({ type: 'image_url', image_url: { url: `data:${img.type};base64,${img.data}` } });
+      });
+      const res = await api('/query/chat', {
+        method: 'POST',
+        body: JSON.stringify({
+          model: 'auto',
+          messages: [{ role: 'user', content }],
+          temperature: 0.2,
+          max_tokens: 2000,
+        }),
+      });
+      clearInterval(litIv);
+      if (!res.ok) {
+        const d = await res.json();
+        results.innerHTML = `<div class="cc-result-card error"><p>Analysis failed: ${esc(d.detail?.message || d.detail || 'Unknown error')}</p></div>`;
+        return;
+      }
+      const data = await res.json();
+      const reply = data.choices?.[0]?.message?.content || data.response || 'No response';
+      results.innerHTML = `<div class="cc-result-card"><h3>Analysis Report</h3><div class="cc-report">${formatMd(reply)}</div></div>`;
+    } catch (ex) {
+      clearInterval(litIv);
+      results.innerHTML = `<div class="cc-result-card error"><p>Error: ${esc(ex.message)}</p></div>`;
+    }
+  };
+}
+
+function fileToBase64(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result.split(',')[1]);
+    reader.onerror = reject;
+    reader.readAsDataURL(file);
+  });
+}
+
+/* ═══════════════════════════════════════════════════════════
+   NOTIFICATIONS — Bell, Panel, Push Subscription
+   ═══════════════════════════════════════════════════════════ */
+async function loadNotifCount() {
+  try {
+    const data = await apiJson('/notifications?per_page=1');
+    const count = data.unread_count || 0;
+    const badge = document.getElementById('notif-count');
+    if (badge) badge.textContent = count > 0 ? (count > 99 ? '99+' : count) : '';
+  } catch {}
+}
+
+async function loadNotifications() {
+  const list = document.getElementById('notif-list');
+  if (!list) return;
+  list.innerHTML = '<div class="loading-state" style="padding:20px"><div class="spinner"></div></div>';
+  try {
+    const data = await apiJson('/notifications?per_page=30');
+    const notifs = data.notifications || [];
+    if (notifs.length === 0) {
+      list.innerHTML = '<div class="notif-empty">No notifications yet</div>';
+      return;
+    }
+    list.innerHTML = notifs.map(n => `
+      <div class="notif-item ${n.is_read ? '' : 'unread'}" data-id="${n.id}" ${n.link ? 'data-link="' + esc(n.link) + '"' : ''}>
+        <div class="notif-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg></div>
+        <div class="notif-body">
+          <span class="notif-title">${esc(n.title)}</span>
+          <span class="notif-text">${esc(n.body || '')}</span>
+          <span class="notif-time">${timeAgo(n.created_at)}</span>
+        </div>
+      </div>
+    `).join('');
+    list.querySelectorAll('.notif-item').forEach(item => {
+      item.onclick = async () => {
+        if (item.classList.contains('unread')) {
+          try { await api('/notifications/' + item.dataset.id + '/read', { method: 'POST' }); item.classList.remove('unread'); loadNotifCount(); } catch {}
+        }
+        const link = item.dataset.link;
+        if (link) { document.getElementById('notif-panel').classList.remove('open'); if (link.startsWith('#')) navigate(link.slice(1)); }
+      };
+    });
+    loadNotifCount();
+  } catch { list.innerHTML = '<div class="notif-empty">Failed to load</div>'; }
+}
+
+/* Push notification subscription */
+async function subscribeToPush() {
+  if (!('serviceWorker' in navigator) || !('PushManager' in window)) return;
+  try {
+    const reg = await navigator.serviceWorker.ready;
+    let sub = await reg.pushManager.getSubscription();
+    if (!sub) {
+      const vapidResp = await apiJson('/notifications/vapid-key').catch(() => null);
+      if (!vapidResp || !vapidResp.public_key) return;
+      sub = await reg.pushManager.subscribe({
+        userVisibleOnly: true,
+        applicationServerKey: urlBase64ToUint8Array(vapidResp.public_key),
+      });
+    }
+    const key = sub.getKey('p256dh');
+    const auth = sub.getKey('auth');
+    await api('/notifications/push/subscribe', {
+      method: 'POST',
+      body: JSON.stringify({
+        endpoint: sub.endpoint,
+        p256dh_key: key ? btoa(String.fromCharCode(...new Uint8Array(key))) : '',
+        auth_key: auth ? btoa(String.fromCharCode(...new Uint8Array(auth))) : '',
+      }),
+    });
+  } catch {}
+}
+
+function urlBase64ToUint8Array(base64String) {
+  const padding = '='.repeat((4 - base64String.length % 4) % 4);
+  const base64 = (base64String + padding).replace(/-/g, '+').replace(/_/g, '/');
+  const raw = atob(base64);
+  return Uint8Array.from([...raw].map(c => c.charCodeAt(0)));
+}
+
+/* ═══════════════════════════════════════════════════════════
    CHART HELPERS
    ═══════════════════════════════════════════════════════════ */
 function makeDonut(id, used, total, color) {
@@ -1486,7 +2642,7 @@ function makeDonut(id, used, total, color) {
    UTILITIES
    ═══════════════════════════════════════════════════════════ */
 function esc(s) { const d = document.createElement('div'); d.textContent = s || ''; return d.innerHTML; }
-function fmtNum(n) { return (n || 0).toLocaleString(); }
+function fmtNum(n) { return Math.round(n || 0).toLocaleString('en-IN'); }
 function timeAgo(iso) {
   const d = new Date(iso);
   const s = Math.floor((Date.now() - d) / 1000);

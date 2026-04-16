@@ -15,6 +15,7 @@ from mac.schemas.chat import (
 )
 from mac.services import llm_service
 from mac.services.usage_service import log_request
+from mac.services import guardrail_service
 from mac.middleware.rate_limit import check_rate_limit
 from mac.models.user import User
 
@@ -29,6 +30,18 @@ async def chat(
 ):
     """Chat completion — multi-turn conversation. OpenAI-compatible."""
     messages = [{"role": m.role, "content": m.content} for m in body.messages]
+
+    # ── Guardrails: check input ──────────────────────────
+    user_text = " ".join(m["content"] for m in messages if m.get("role") == "user")
+    if user_text:
+        db_rules = await guardrail_service.get_db_rules(db)
+        input_check = guardrail_service.check_input(user_text, db_rules)
+        if not input_check["safe"]:
+            blocked = [v for v in input_check["violations"] if v["action"] == "block"]
+            raise HTTPException(status_code=400, detail={
+                "code": "content_blocked",
+                "message": blocked[0]["description"] if blocked else "Content blocked by safety filter",
+            })
 
     # Streaming
     if body.stream:
@@ -76,13 +89,19 @@ async def chat(
 
     # Build response
     choice_data = result["choices"][0]
+    content = choice_data["message"]["content"]
+
+    # ── Guardrails: check output (PII redaction, etc.) ───
+    output_check = guardrail_service.check_output(content, db_rules if user_text else None)
+    content = output_check["text"]
+
     return ChatResponse(
         id=result["id"],
         created=result["created"],
         model=result["model"],
         choices=[ChatChoice(
             index=0,
-            message=ChatMessage(role="assistant", content=choice_data["message"]["content"]),
+            message=ChatMessage(role="assistant", content=content),
             finish_reason=choice_data.get("finish_reason", "stop"),
         )],
         usage=UsageInfo(**usage),

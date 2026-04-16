@@ -178,11 +178,13 @@ async def update_profile(
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """Update own profile fields (name, email)."""
+    """Update own profile fields (name, email, department for admins)."""
     if "name" in body:
         user.name = body["name"][:100]
     if "email" in body:
         user.email = body["email"][:200] if body["email"] else None
+    if "department" in body and body["department"] and user.role == "admin":
+        user.department = body["department"][:50]
     await db.flush()
     return MessageResponse(message="Profile updated")
 
@@ -288,6 +290,37 @@ async def update_user_role(
     user.role = new_role
     await db.commit()
     return {"message": f"User {user.roll_number} role updated to {new_role}"}
+
+
+@router.put("/admin/users/{user_id}")
+async def admin_edit_user(
+    user_id: str,
+    body: dict,
+    admin: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    """Full edit of any user by admin — name, email, department, role, is_active."""
+    user = await auth_service.get_user_by_id(db, user_id)
+    if not user:
+        raise HTTPException(status_code=404, detail={"code": "not_found", "message": "User not found"})
+
+    allowed = {"name", "email", "department", "role", "is_active"}
+    for field in allowed:
+        if field in body:
+            val = body[field]
+            if field == "role" and val not in ("student", "faculty", "admin"):
+                raise HTTPException(status_code=400, detail={"code": "validation_error", "message": "role must be student, faculty, or admin"})
+            setattr(user, field, val)
+
+    await db.commit()
+    return {
+        "message": f"User {user.roll_number} updated",
+        "user": {
+            "id": user.id, "roll_number": user.roll_number, "name": user.name,
+            "email": user.email, "department": user.department, "role": user.role,
+            "is_active": user.is_active,
+        },
+    }
 
 
 @router.put("/admin/users/{user_id}/status")

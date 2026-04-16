@@ -1,0 +1,38 @@
+# ═══════════════════════════════════════════════════════════
+#  PC 1 — GPU Inference Node (vLLM only)
+# ═══════════════════════════════════════════════════════════
+#  Run on the PC with the GPU. Exposes vLLM on port 8001.
+#  PC 2 connects to this PC's IP:8001 for AI inference.
+#
+#  Usage:
+#    docker compose -f docker-compose.pc1-gpu.yml up -d
+# ═══════════════════════════════════════════════════════════
+
+services:
+  vllm-speed:
+    image: vllm/vllm-openai:latest
+    container_name: mac-vllm-speed
+    ports:
+      - "8001:8001"
+    environment:
+      - HF_HOME=/root/.cache/huggingface
+    volumes:
+      - hf-cache:/root/.cache/huggingface
+    command: >
+      --model Qwen/Qwen2.5-7B-Instruct-AWQ
+      --port 8001
+      --gpu-memory-utilization 0.90
+      --max-model-len 8192
+      --trust-remote-code
+      --enforce-eager
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    restart: unless-stopped
+
+volumes:
+  hf-cache:

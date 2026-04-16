@@ -15,6 +15,8 @@ from mac.routers import (
     auth, explore, query, usage,
     models, integration, keys, quota,
     guardrails, rag, search,
+    nodes, attendance, doubts, notifications,
+    scoped_keys, agent,
 )
 
 FRONTEND_DIR = pathlib.Path(__file__).resolve().parent.parent / "frontend"
@@ -28,6 +30,10 @@ async def lifespan(app: FastAPI):
     import mac.models.guardrail  # noqa: F401
     import mac.models.quota  # noqa: F401
     import mac.models.rag  # noqa: F401
+    import mac.models.node  # noqa: F401
+    import mac.models.attendance  # noqa: F401
+    import mac.models.doubt  # noqa: F401
+    import mac.models.notification  # noqa: F401
 
     # Create tables (dev only — production uses Alembic)
     if settings.is_dev:
@@ -68,6 +74,12 @@ app.include_router(quota.router, prefix="/api/v1")
 app.include_router(guardrails.router, prefix="/api/v1")
 app.include_router(rag.router, prefix="/api/v1")
 app.include_router(search.router, prefix="/api/v1")
+app.include_router(nodes.router, prefix="/api/v1")
+app.include_router(attendance.router, prefix="/api/v1")
+app.include_router(doubts.router, prefix="/api/v1")
+app.include_router(notifications.router, prefix="/api/v1")
+app.include_router(scoped_keys.router, prefix="/api/v1")
+app.include_router(agent.router, prefix="/api/v1")
 
 # Serve frontend static files
 if FRONTEND_DIR.exists():
@@ -132,6 +144,12 @@ async def api_root():
             "guardrails": "/api/v1/guardrails",
             "rag": "/api/v1/rag",
             "search": "/api/v1/search",
+            "nodes": "/api/v1/nodes",
+            "attendance": "/api/v1/attendance",
+            "doubts": "/api/v1/doubts",
+            "notifications": "/api/v1/notifications",
+            "scoped_keys": "/api/v1/scoped-keys",
+            "agent": "/api/v1/agent",
         }
     }
 
@@ -139,64 +157,69 @@ async def api_root():
 # ── Dev seed ─────────────────────────────────────────────
 
 async def _seed_dev_user():
-    """Seed admin + 4 student accounts in dev mode."""
+    """Seed 3 accounts: admin, faculty, student."""
     from datetime import date
     from mac.database import async_session
     from mac.services.auth_service import get_user_by_roll, create_user, get_registry_entry
     from mac.models.user import StudentRegistry
 
-    async with async_session() as db:
-        # ── 1) Super Admin: Prof. Abhishek Gaur ───────────
-        admin_existing = await get_user_by_roll(db, "abhisek.cse@mbm.ac.in")
-        if not admin_existing:
-            admin = await create_user(
-                db,
-                roll_number="abhisek.cse@mbm.ac.in",
-                name="Prof. Abhishek Gaur",
-                password="Admin@1234",
-                department="CSE",
-                role="admin",
-                must_change_password=False,
-                email="abhisek.cse@mbm.ac.in",
-            )
-            print(f"  [SEED] Super Admin: {admin.roll_number} / Admin@1234")
-            print(f"  [SEED] Admin API key: {admin.api_key}")
-
-        # ── 2) Student Registry + pre-created accounts ────
-        sample_students = [
-            ("abhisek.cse@mbm.ac.in", "Prof. Abhishek Gaur", "CSE", date(1990, 1, 1), 2020),
-            ("21CS045", "Aaryan Rajput", "CSE", date(2003, 8, 15), 2021),
-            ("21CS001", "Aarav Sharma", "CSE", date(2003, 1, 10), 2021),
-            ("21ME010", "Priya Patel", "ME", date(2003, 5, 22), 2021),
-            ("22EC030", "Rahul Verma", "ECE", date(2004, 3, 8), 2022),
-            ("22CE015", "Neha Singh", "CE", date(2004, 11, 30), 2022),
-        ]
-        for roll, name, dept, dob, batch in sample_students:
-            existing = await get_registry_entry(db, roll)
-            if not existing:
-                db.add(StudentRegistry(
-                    roll_number=roll, name=name, department=dept, dob=dob, batch_year=batch,
-                ))
-
-        # Pre-create 4 student accounts with default passwords
-        student_accounts = [
-            ("21CS045", "Aaryan Rajput",  "CSE", "Student@1234"),
-            ("21CS001", "Aarav Sharma",   "CSE", "Student@1234"),
-            ("21ME010", "Priya Patel",    "ME",  "Student@1234"),
-            ("22EC030", "Rahul Verma",    "ECE", "Student@1234"),
-        ]
-        for roll, name, dept, pwd in student_accounts:
-            if not await get_user_by_roll(db, roll):
-                u = await create_user(
+    try:
+        async with async_session() as db:
+            # ── 1) Super Admin: Prof. Abhishek Gaur ───────────
+            if not await get_user_by_roll(db, "abhisek.cse@mbm.ac.in"):
+                admin = await create_user(
                     db,
-                    roll_number=roll,
-                    name=name,
-                    password=pwd,
-                    department=dept,
+                    roll_number="abhisek.cse@mbm.ac.in",
+                    name="Prof. Abhishek Gaur",
+                    password="Admin@1234",
+                    department="CSE",
+                    role="admin",
+                    must_change_password=False,
+                    email="abhisek.cse@mbm.ac.in",
+                )
+                print(f"  [SEED] Admin: {admin.roll_number} / Admin@1234")
+                print(f"  [SEED] Admin API key: {admin.api_key}")
+
+            # ── 2) Faculty: Dr. Raj Kumar ─────────────────────
+            if not await get_user_by_roll(db, "raj.cse@mbm.ac.in"):
+                fac = await create_user(
+                    db,
+                    roll_number="raj.cse@mbm.ac.in",
+                    name="Dr. Raj Kumar",
+                    password="Faculty@1234",
+                    department="CSE",
+                    role="faculty",
+                    must_change_password=False,
+                    email="raj.cse@mbm.ac.in",
+                )
+                print(f"  [SEED] Faculty: {fac.roll_number} / Faculty@1234")
+
+            # ── 3) Student: Aaryan Rajput ─────────────────────
+            registry_entries = [
+                ("abhisek.cse@mbm.ac.in", "Prof. Abhishek Gaur", "CSE", date(1990, 1, 1), 2020),
+                ("raj.cse@mbm.ac.in", "Dr. Raj Kumar", "CSE", date(1985, 6, 15), 2018),
+                ("21CS045", "Aaryan Rajput", "CSE", date(2003, 8, 15), 2021),
+            ]
+            for roll, name, dept, dob, batch in registry_entries:
+                if not await get_registry_entry(db, roll):
+                    db.add(StudentRegistry(
+                        roll_number=roll, name=name, department=dept, dob=dob, batch_year=batch,
+                    ))
+
+            if not await get_user_by_roll(db, "21CS045"):
+                stu = await create_user(
+                    db,
+                    roll_number="21CS045",
+                    name="Aaryan Rajput",
+                    password="Student@1234",
+                    department="CSE",
                     role="student",
                     must_change_password=False,
                 )
-                print(f"  [SEED] Student: {roll} / {pwd}")
+                print(f"  [SEED] Student: {stu.roll_number} / Student@1234")
 
-        await db.commit()
-        print("  [SEED] All users seeded")
+            await db.commit()
+            print("  [SEED] All 3 accounts seeded (admin / faculty / student)")
+    except Exception as e:
+        # Race condition: another worker already seeded
+        print(f"  [SEED] Skipped (already seeded or race): {e}")

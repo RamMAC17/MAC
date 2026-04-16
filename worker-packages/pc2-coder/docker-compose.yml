@@ -1,0 +1,61 @@
+# MAC GPU Worker — PC2 Coder (Qwen2.5-Coder-7B-AWQ)
+
+services:
+
+  vllm:
+    image: vllm/vllm-openai:latest
+    container_name: mac-vllm-coder
+    ports:
+      - "8001:8001"
+    environment:
+      - HF_HOME=/root/.cache/huggingface
+    volumes:
+      - hf-cache:/root/.cache/huggingface
+    command: >
+      --model ${VLLM_MODEL:-Qwen/Qwen2.5-Coder-7B-Instruct-AWQ}
+      --port 8001
+      --gpu-memory-utilization ${GPU_MEM_UTIL:-0.85}
+      --max-model-len ${MAX_MODEL_LEN:-8192}
+      --trust-remote-code
+      --enforce-eager
+      --dtype half
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    restart: unless-stopped
+    networks:
+      - worker-net
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8001/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 180s
+
+  worker-agent:
+    image: python:3.11-slim
+    container_name: mac-worker-agent
+    env_file: .env
+    volumes:
+      - ./worker-agent.py:/app/agent.py:ro
+      - agent-state:/tmp
+    command: >
+      bash -c "pip install httpx psutil --quiet && python /app/agent.py"
+    depends_on:
+      vllm:
+        condition: service_healthy
+    restart: unless-stopped
+    networks:
+      - worker-net
+
+volumes:
+  hf-cache:
+  agent-state:
+
+networks:
+  worker-net:
+    driver: bridge

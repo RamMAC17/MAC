@@ -1,0 +1,74 @@
+# ═══════════════════════════════════════════════════════════
+#  MAC — GPU Worker Node (PC2-PC7)
+#  Each worker PC runs vLLM inference + a heartbeat agent.
+#  The agent enrolls with the control node and sends health data.
+#
+#  Prerequisites:
+#    1. Get enrollment token from admin: POST /api/v1/nodes/enrollment-token
+#    2. Set ENROLLMENT_TOKEN in .env
+#    3. Set CONTROL_NODE_URL to the control node's address
+#
+#  Usage:  docker compose -f docker-compose.worker-node.yml up -d
+# ═══════════════════════════════════════════════════════════
+
+services:
+
+  # ── vLLM GPU Inference ─────────────────────────────────
+  vllm:
+    image: vllm/vllm-openai:latest
+    container_name: mac-vllm-worker
+    ports:
+      - "${VLLM_PORT:-8001}:${VLLM_PORT:-8001}"
+    environment:
+      - HF_HOME=/root/.cache/huggingface
+    volumes:
+      - hf-cache:/root/.cache/huggingface
+    command: >
+      --model ${VLLM_MODEL:-Qwen/Qwen2.5-7B-Instruct-AWQ}
+      --port ${VLLM_PORT:-8001}
+      --gpu-memory-utilization ${GPU_MEM_UTIL:-0.85}
+      --max-model-len ${MAX_MODEL_LEN:-8192}
+      --trust-remote-code
+      --enforce-eager
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    restart: unless-stopped
+    networks:
+      - worker-net
+
+  # ── Worker Agent — Enrollment + Heartbeat ──────────────
+  worker-agent:
+    image: python:3.11-slim
+    container_name: mac-worker-agent
+    environment:
+      - CONTROL_NODE_URL=${CONTROL_NODE_URL:-http://192.168.1.100:8000}
+      - ENROLLMENT_TOKEN=${ENROLLMENT_TOKEN:-}
+      - NODE_NAME=${NODE_NAME:-worker-1}
+      - VLLM_PORT=${VLLM_PORT:-8001}
+      - VLLM_MODEL=${VLLM_MODEL:-Qwen/Qwen2.5-7B-Instruct-AWQ}
+      - GPU_NAME=${GPU_NAME:-NVIDIA RTX 3060}
+      - GPU_VRAM_MB=${GPU_VRAM_MB:-12288}
+      - RAM_TOTAL_MB=${RAM_TOTAL_MB:-16384}
+      - CPU_CORES=${CPU_CORES:-8}
+      - HEARTBEAT_INTERVAL=${HEARTBEAT_INTERVAL:-30}
+    volumes:
+      - ./worker-agent.py:/app/agent.py:ro
+    command: >
+      bash -c "pip install httpx psutil --quiet && python /app/agent.py"
+    depends_on:
+      - vllm
+    restart: unless-stopped
+    networks:
+      - worker-net
+
+volumes:
+  hf-cache:
+
+networks:
+  worker-net:
+    driver: bridge

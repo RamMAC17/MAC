@@ -1,0 +1,160 @@
+# ═══════════════════════════════════════════════════════════
+#  PC 2 — Application Server (everything except vLLM)
+# ═══════════════════════════════════════════════════════════
+#  Run on the second PC. Serves the web UI on port 80.
+#  Connects to PC 1's vLLM via LAN IP.
+#
+#  BEFORE STARTING: Update PC1_IP below to PC 1's LAN IP.
+#
+#  Usage:
+#    $env:PC1_IP="10.10.13.30"   # Set PC 1's IP
+#    docker compose -f docker-compose.pc2-app.yml up -d
+# ═══════════════════════════════════════════════════════════
+
+services:
+
+  # ── MAC API Server ──────────────────────────────────────
+  mac:
+    build: .
+    container_name: mac-api
+    ports:
+      - "8000:8000"
+    env_file: .env
+    environment:
+      - DATABASE_URL=postgresql+asyncpg://mac:mac_password@postgres:5432/mac_db
+      - REDIS_URL=redis://redis:6379/0
+      # All vLLM URLs point to PC 1's GPU over LAN
+      - VLLM_BASE_URL=http://${PC1_IP:-10.10.13.30}:8001
+      - VLLM_SPEED_URL=http://${PC1_IP:-10.10.13.30}:8001
+      - VLLM_CODE_URL=http://${PC1_IP:-10.10.13.30}:8001
+      - VLLM_REASONING_URL=http://${PC1_IP:-10.10.13.30}:8001
+      - VLLM_INTELLIGENCE_URL=http://${PC1_IP:-10.10.13.30}:8001
+      - WHISPER_URL=http://whisper:8000
+      - TTS_URL=http://tts:8000
+      - EMBEDDING_URL=http://${PC1_IP:-10.10.13.30}:8001
+      - QDRANT_URL=http://qdrant:6333
+      - SEARXNG_URL=http://searxng:8080
+      - MAC_ENABLED_MODELS=qwen2.5:7b,whisper-small,tts-piper
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+    networks:
+      - mac-net
+
+  # ── Whisper — Speech-to-Text (CPU mode) ────────────────
+  whisper:
+    image: fedirz/faster-whisper-server:latest-cpu
+    container_name: mac-whisper
+    ports:
+      - "8005:8000"
+    environment:
+      - WHISPER__MODEL=Systran/faster-whisper-small
+      - WHISPER__DEVICE=cpu
+    restart: unless-stopped
+    networks:
+      - mac-net
+
+  # ── Piper TTS — Text-to-Speech (CPU) ──────────────────
+  tts:
+    image: ghcr.io/matatonic/openedai-speech:latest
+    container_name: mac-tts
+    ports:
+      - "8006:8000"
+    volumes:
+      - tts-voices:/app/voices
+    restart: unless-stopped
+    networks:
+      - mac-net
+
+  # ── PostgreSQL ─────────────────────────────────────────
+  postgres:
+    image: postgres:16-alpine
+    container_name: mac-postgres
+    environment:
+      POSTGRES_USER: mac
+      POSTGRES_PASSWORD: mac_password
+      POSTGRES_DB: mac_db
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U mac -d mac_db"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+    networks:
+      - mac-net
+
+  # ── Redis ──────────────────────────────────────────────
+  redis:
+    image: redis:7-alpine
+    container_name: mac-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+    networks:
+      - mac-net
+
+  # ── Nginx — Reverse proxy + frontend ───────────────────
+  nginx:
+    image: nginx:alpine
+    container_name: mac-nginx
+    ports:
+      - "80:80"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./frontend:/usr/share/nginx/html:ro
+    depends_on:
+      - mac
+    restart: unless-stopped
+    networks:
+      - mac-net
+
+  # ── Qdrant — Vector DB ────────────────────────────────
+  qdrant:
+    image: qdrant/qdrant:latest
+    container_name: mac-qdrant
+    ports:
+      - "6333:6333"
+    volumes:
+      - qdrantdata:/qdrant/storage
+    restart: unless-stopped
+    networks:
+      - mac-net
+
+  # ── SearXNG — Web search ──────────────────────────────
+  searxng:
+    image: searxng/searxng:latest
+    container_name: mac-searxng
+    ports:
+      - "8888:8080"
+    environment:
+      - SEARXNG_BASE_URL=http://localhost:8888/
+    volumes:
+      - searxngdata:/etc/searxng
+    restart: unless-stopped
+    networks:
+      - mac-net
+
+volumes:
+  pgdata:
+  redisdata:
+  qdrantdata:
+  searxngdata:
+  tts-voices:
+
+networks:
+  mac-net:
+    driver: bridge

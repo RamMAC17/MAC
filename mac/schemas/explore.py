@@ -54,6 +54,7 @@ class NodeHealth(BaseModel):
     models_loaded: List[str] = []
     requests_in_flight: int = 0
     status: str = "active"
+    context_window: int = 8192
 
 
 class HealthResponse(BaseModel):

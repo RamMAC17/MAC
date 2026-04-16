@@ -26,7 +26,7 @@ class StudentRegistry(Base):
     __tablename__ = "student_registry"
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_gen_uuid)
-    roll_number: Mapped[str] = mapped_column(String(20), unique=True, index=True, nullable=False)
+    roll_number: Mapped[str] = mapped_column(String(50), unique=True, index=True, nullable=False)
     name: Mapped[str] = mapped_column(String(100), nullable=False)
     department: Mapped[str] = mapped_column(String(20), nullable=False, default="CSE")
     dob: Mapped[date] = mapped_column(Date, nullable=False)          # DD‑MM‑YYYY at entry
@@ -37,7 +37,7 @@ class User(Base):
     __tablename__ = "users"
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_gen_uuid)
-    roll_number: Mapped[str] = mapped_column(String(20), unique=True, index=True, nullable=False)
+    roll_number: Mapped[str] = mapped_column(String(50), unique=True, index=True, nullable=False)
     name: Mapped[str] = mapped_column(String(100), nullable=False)
     email: Mapped[str] = mapped_column(String(200), nullable=True)
     department: Mapped[str] = mapped_column(String(20), nullable=False, default="CSE")

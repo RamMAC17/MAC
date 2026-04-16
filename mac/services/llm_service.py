@@ -1,11 +1,38 @@
-"""LLM service — proxy requests to local vLLM GPU inference backends."""
+"""LLM service — proxy requests to local vLLM GPU inference backends + cluster routing."""
 
 import json
 import time
 import httpx
-from typing import AsyncIterator
+from typing import AsyncIterator, Optional
 from mac.config import settings
 from mac.utils.security import generate_request_id
+
+# ═══════════════════════════════════════════════════════════
+#  MAC SYSTEM PROMPT — Identity & Guardrails
+# ═══════════════════════════════════════════════════════════
+
+_MAC_SYSTEM_PROMPT = (
+    "You are MAC (MBM AI Cloud), an AI assistant built and self-hosted by the MAC team "
+    "at MBM University, Jodhpur. You run entirely on the college's own GPU servers — "
+    "no cloud APIs, no external services. "
+    "When asked who you are, say you are MAC, created by the MAC team at MBM University. "
+    "Never say you are Qwen, ChatGPT, Claude, or any other AI. Never mention Alibaba, OpenAI, or Anthropic as your creator. "
+    "You are helpful, accurate, and concise. You assist MBM students and faculty with "
+    "academics, coding, research, and general knowledge. "
+    "Be respectful and professional. Do not generate harmful, hateful, or explicit content. "
+    "If asked about your hardware, you run on an NVIDIA RTX 3060 GPU at MBM University."
+)
+
+
+def _inject_system_prompt(messages: list[dict]) -> list[dict]:
+    """Prepend the MAC identity system prompt if no system message exists."""
+    if messages and messages[0].get("role") == "system":
+        # Merge with existing system prompt
+        messages = list(messages)
+        messages[0] = {**messages[0], "content": _MAC_SYSTEM_PROMPT + "\n\n" + messages[0]["content"]}
+        return messages
+    return [{"role": "system", "content": _MAC_SYSTEM_PROMPT}] + list(messages)
+
 
 # ═══════════════════════════════════════════════════════════
 #  MODEL REGISTRY
@@ -23,7 +50,7 @@ _BUILTIN_MODELS: dict[str, dict] = {
         "context_length": 32768,
         "capabilities": ["chat", "completion"],
         "category": "speed",
-        "served_name": "Qwen/Qwen2.5-7B-Instruct",
+        "served_name": "Qwen/Qwen2.5-7B-Instruct-AWQ",
         "url_key": "vllm_speed_url",
     },
     "qwen2.5-coder:7b": {
@@ -37,6 +64,17 @@ _BUILTIN_MODELS: dict[str, dict] = {
         "served_name": "Qwen/Qwen2.5-Coder-7B-Instruct",
         "url_key": "vllm_code_url",
     },
+    "qwen2.5-coder:7b-awq": {
+        "name": "Qwen2.5-Coder 7B AWQ",
+        "model_type": "chat",
+        "specialty": "Code generation, debugging, explanation (quantized, fits 12GB GPU)",
+        "parameters": "7B",
+        "context_length": 32768,
+        "capabilities": ["code", "chat", "completion"],
+        "category": "code",
+        "served_name": "Qwen/Qwen2.5-Coder-7B-Instruct-AWQ",
+        "url_key": "vllm_code_url",
+    },
     "deepseek-r1:14b": {
         "name": "DeepSeek-R1 14B",
         "model_type": "chat",
@@ -46,6 +84,17 @@ _BUILTIN_MODELS: dict[str, dict] = {
         "capabilities": ["reasoning", "math", "chat"],
         "category": "reasoning",
         "served_name": "deepseek-ai/DeepSeek-R1-Distill-Qwen-14B",
+        "url_key": "vllm_reasoning_url",
+    },
+    "deepseek-r1:7b": {
+        "name": "DeepSeek-R1 7B",
+        "model_type": "chat",
+        "specialty": "Maths, reasoning, step-by-step logic (lighter, fits 12GB)",
+        "parameters": "7B",
+        "context_length": 32768,
+        "capabilities": ["reasoning", "math", "chat"],
+        "category": "reasoning",
+        "served_name": "deepseek-ai/DeepSeek-R1-Distill-Qwen-7B",
         "url_key": "vllm_reasoning_url",
     },
     "gemma3:27b": {
@@ -239,7 +288,8 @@ def _smart_route(messages: list[dict] | None = None) -> str:
 
 
 def _resolve_model(model_id: str, messages: list[dict] | None = None) -> tuple[str, str]:
-    """Resolve model ID → (served_name, base_url)."""
+    """Resolve model ID → (served_name, base_url).
+    Uses local vLLM config. For cluster-aware routing, use _resolve_model_cluster."""
     if model_id == "auto":
         model_id = _smart_route(messages)
     if model_id in DEFAULT_MODELS:
@@ -248,6 +298,46 @@ def _resolve_model(model_id: str, messages: list[dict] | None = None) -> tuple[s
         return m["served_name"], url
     # Fallback: unknown model → send to default vLLM endpoint
     return model_id, settings.vllm_base_url
+
+
+async def _resolve_model_cluster(
+    model_id: str, messages: list[dict] | None = None
+) -> tuple[str, str]:
+    """Cluster-aware model resolution. Tries worker nodes first, then local vLLM.
+    Returns (served_name, base_url)."""
+    if model_id == "auto":
+        model_id = _smart_route(messages)
+
+    served_name = model_id
+    local_url = settings.vllm_base_url
+
+    if model_id in DEFAULT_MODELS:
+        m = DEFAULT_MODELS[model_id]
+        served_name = m["served_name"]
+        local_url = getattr(settings, m.get("url_key", "vllm_speed_url"), settings.vllm_base_url)
+
+    # Try cluster routing — check if any worker node hosts this model
+    try:
+        from mac.database import async_session as async_session_factory
+        from mac.services import node_service
+
+        async with async_session_factory() as db:
+            result = await node_service.resolve_model_endpoint(db, model_id)
+            if result:
+                cluster_url, cluster_served_name = result
+                # Verify node is actually reachable (quick health check)
+                try:
+                    async with httpx.AsyncClient(timeout=3) as client:
+                        resp = await client.get(f"{cluster_url}/health")
+                        if resp.status_code == 200:
+                            # Use the served_name from the deployment (matches actual loaded model)
+                            return cluster_served_name, cluster_url
+                except httpx.RequestError:
+                    pass  # Node unreachable, fall through to local
+    except Exception:
+        pass  # DB unavailable, use local config
+
+    return served_name, local_url
 
 
 def _api_url(base: str, path: str) -> str:
@@ -273,7 +363,8 @@ async def chat_completion(
     stop: list[str] | str | None = None,
 ) -> dict:
     """Chat completion via local vLLM (OpenAI-compatible API)."""
-    resolved, base_url = _resolve_model(model, messages)
+    resolved, base_url = await _resolve_model_cluster(model, messages)
+    messages = _inject_system_prompt(messages)
     request_id = generate_request_id("mac-chat")
     start = time.time()
 
@@ -336,7 +427,8 @@ async def chat_completion_stream(
     stop: list[str] | str | None = None,
 ) -> AsyncIterator[str]:
     """Stream a chat completion as SSE data lines."""
-    resolved, base_url = _resolve_model(model, messages)
+    resolved, base_url = await _resolve_model_cluster(model, messages)
+    messages = _inject_system_prompt(messages)
     request_id = generate_request_id("mac-chat")
 
     payload: dict = {
@@ -408,7 +500,7 @@ async def text_completion(
     stop: list[str] | str | None = None,
 ) -> dict:
     """Text completion via chat endpoint (vLLM supports both)."""
-    resolved, base_url = _resolve_model(model)
+    resolved, base_url = await _resolve_model_cluster(model)
     request_id = generate_request_id("mac-comp")
     start = time.time()
 

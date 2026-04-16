@@ -169,6 +169,7 @@ async def health():
             gpu="HuggingFace Serverless",
             models_loaded=model_names,
             status="active",
+            context_window=8192,
         )],
         models_loaded=len(DEFAULT_MODELS),
         models_total=len(DEFAULT_MODELS),

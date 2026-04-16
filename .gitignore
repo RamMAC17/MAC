@@ -29,6 +29,16 @@ Thumbs.db
 docs/*.pdf
 docs/*.docx
 
+# SSL certs (self-signed)
+nginx/ssl/
+
+# Logs
+*.log
+vllm-logs*.txt
+
+# Alembic versions (auto-generated)
+alembic/versions/
+
 # Testing
 .pytest_cache/
 .coverage
