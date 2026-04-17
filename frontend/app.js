@@ -7,6 +7,17 @@
 const API = '/api/v1';
 const state = { token: localStorage.getItem('mac_token'), user: null, page: 'login' };
 let deferredInstallPrompt = null;
+let _notifPollIv = null; // real-time notification polling interval
+
+// ── User-scoped localStorage ──────────────────────────────
+function _userKey(key) {
+  const uid = state.user?.id || '_anon';
+  return `mac_${uid}_${key}`;
+}
+function userGet(key, fallback) {
+  try { const v = localStorage.getItem(_userKey(key)); return v !== null ? JSON.parse(v) : fallback; } catch { return fallback; }
+}
+function userSet(key, val) { localStorage.setItem(_userKey(key), JSON.stringify(val)); }
 
 // ── PWA install prompt capture ────────────────────────────
 window.addEventListener('beforeinstallprompt', e => {
@@ -30,9 +41,9 @@ async function api(path, opts = {}) {
 }
 async function apiJson(path, opts) { const r = await api(path, opts); return r.json(); }
 
-// ── Session storage ───────────────────────────────────────
-function getSessions() { try { return JSON.parse(localStorage.getItem('mac_sessions') || '[]'); } catch { return []; } }
-function saveSessions(s) { localStorage.setItem('mac_sessions', JSON.stringify(s)); }
+// ── Session storage (user-scoped) ─────────────────────────
+function getSessions() { return userGet('sessions', []); }
+function saveSessions(s) { userSet('sessions', s); }
 function getSession(id) { return getSessions().find(s => s.id === id); }
 
 // ── Eye toggle SVGs ───────────────────────────────────────
@@ -90,6 +101,18 @@ function bindEyeToggles(root) {
   });
 }
 
+// ── Theme ─────────────────────────────────────────────────
+function applyTheme(theme) {
+  document.documentElement.setAttribute('data-theme', theme);
+  localStorage.setItem('mac_theme', theme);
+}
+
+// Apply saved theme immediately (default: warm)
+(function() {
+  const saved = localStorage.getItem('mac_theme') || 'warm';
+  document.documentElement.setAttribute('data-theme', saved);
+})();
+
 // ── Router ────────────────────────────────────────────────
 function navigate(page) {
   if (state.user && state.user.must_change_password && page !== 'set-password' && page !== 'login') {
@@ -125,8 +148,14 @@ async function init() {
         state.page = 'login';
       } else {
         state.page = location.hash.slice(1) || 'dashboard';
+        // Load user-scoped data
+        _nbLoadFromStorage();
         // Subscribe to push notifications
         subscribeToPush();
+        // Request browser notification permission
+        requestNotificationPermission();
+        // Start real-time notification polling
+        startNotifPolling();
       }
     } catch { state.token = null; localStorage.removeItem('mac_token'); state.page = 'login'; }
   }
@@ -153,6 +182,7 @@ function render() {
     _dashRefreshIv = setInterval(() => { if (state.page === 'dashboard') renderDashboard(); }, 30000);
   }
   else if (state.page === 'chat') renderChat();
+  else if (state.page === 'notebooks') renderNotebooks();
   else if (state.page === 'admin') renderAdmin();
   else if (state.page === 'settings') renderSettings();
   else if (state.page === 'doubts') renderDoubts();
@@ -164,6 +194,10 @@ function render() {
 function logout() {
   state.token = null; state.user = null;
   localStorage.removeItem('mac_token');
+  // Stop notification polling
+  if (_notifPollIv) { clearInterval(_notifPollIv); _notifPollIv = null; }
+  // Reset notebook state (don't clear storage — user data stays for next login)
+  _nbState.notebooks = []; _nbState.current = null; _nbState.cells = []; _nbState.outputs = {};
   navigate('login');
 }
 
@@ -259,6 +293,7 @@ function bindAuth() {
         const data = await r.json();
         state.token = data.access_token; state.user = data.user;
         localStorage.setItem('mac_token', data.access_token);
+        _nbLoadFromStorage(); requestNotificationPermission(); startNotifPolling(); subscribeToPush();
         if (data.must_change_password) navigate('set-password'); else navigate('dashboard');
       } catch (ex) { err.textContent = 'Connection error'; }
     } else {
@@ -273,6 +308,7 @@ function bindAuth() {
         const data = await r.json();
         state.token = data.access_token; state.user = data.user;
         localStorage.setItem('mac_token', data.access_token);
+        _nbLoadFromStorage(); requestNotificationPermission(); startNotifPolling(); subscribeToPush();
         if (data.must_change_password) navigate('set-password'); else navigate('dashboard');
       } catch (ex) { err.textContent = 'Connection error'; }
     }
@@ -319,6 +355,7 @@ function bindSetPassword() {
       });
       if (!r.ok) { const d = await r.json(); err.textContent = d.detail?.message || 'Failed'; return; }
       state.user = await apiJson('/auth/me');
+      _nbLoadFromStorage(); requestNotificationPermission(); startNotifPolling(); subscribeToPush();
       navigate('dashboard');
     } catch (ex) { err.textContent = ex.message; }
   };
@@ -331,7 +368,8 @@ function shell() {
   const u = state.user || {};
   const isAdmin = u.role === 'admin';
   const isFacultyOrAdmin = u.role === 'faculty' || u.role === 'admin';
-  const pages = { dashboard: 'Dashboard', chat: 'Chat', doubts: 'Doubts', attendance: 'Attendance', copycheck: 'Copy Check', settings: 'Settings', admin: 'Admin' };
+  const isStudent = u.role === 'student';
+  const pages = { dashboard: 'Dashboard', chat: 'Chat', notebooks: 'Notebooks', doubts: 'Doubts', attendance: 'Attendance', copycheck: 'Copy Check', settings: 'Settings', admin: 'Admin' };
   const dockSide = localStorage.getItem('mac_dock_side') || 'left';
   return `
   <div class="shell dock-${dockSide}" id="shell">
@@ -354,6 +392,10 @@ function shell() {
             <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
             <span>Chat</span>
           </a>
+          <a href="#notebooks" data-page="notebooks" class="${state.page==='notebooks'?'active':''}">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z"/><path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z"/></svg>
+            <span>Notebooks</span>
+          </a>
           <a href="#doubts" data-page="doubts" class="${state.page==='doubts'?'active':''}">
             <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
             <span>Doubts</span>
@@ -361,7 +403,10 @@ function shell() {
           ${isFacultyOrAdmin ? `<a href="#attendance" data-page="attendance" class="${state.page==='attendance'?'active':''}">
             <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="4" width="18" height="18" rx="2" ry="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/><path d="M8 14l2 2 4-4"/></svg>
             <span>Attendance</span>
-          </a>` : ''}
+          </a>` : `<a href="#attendance" data-page="attendance" class="${state.page==='attendance'?'active':''}">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="4" width="18" height="18" rx="2" ry="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/><path d="M8 14l2 2 4-4"/></svg>
+            <span>Attendance</span>
+          </a>`}
           ${isFacultyOrAdmin ? `<a href="#copycheck" data-page="copycheck" class="${state.page==='copycheck'?'active':''}">
             <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><path d="M9 15l2 2 4-4"/></svg>
             <span>Copy Check</span>
@@ -934,6 +979,25 @@ async function renderSettings() {
         <button class="btn btn-primary" id="change-pw-btn" style="width:auto;padding:8px 24px">Update Password</button>
       </div>
       <div class="settings-card">
+        <h3><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-3px;margin-right:6px"><circle cx="12" cy="12" r="10"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg>Theme</h3>
+        <p style="font-size:.85rem;color:var(--muted);margin-bottom:12px">Choose a color theme for the entire interface.</p>
+        <div class="theme-picker" id="theme-picker">
+          <div class="theme-dot" data-theme="warm" title="Warm (Default)"></div>
+          <div class="theme-dot" data-theme="moonstone" title="Moonstone"></div>
+          <div class="theme-dot" data-theme="matcha" title="Matcha"></div>
+          <div class="theme-dot" data-theme="nordic" title="Nordic"></div>
+          <div class="theme-dot" data-theme="dark" title="Dark"></div>
+          <div class="theme-dot" data-theme="pink" title="Pink"></div>
+          <div class="theme-dot" data-theme="aqua" title="Aqua"></div>
+          <div class="theme-dot" data-theme="blue" title="Blue"></div>
+          <div class="theme-dot" data-theme="peach" title="Peach"></div>
+          <div class="theme-dot" data-theme="purple" title="Purple"></div>
+          <div class="theme-dot" data-theme="green" title="Green"></div>
+          <div class="theme-dot" data-theme="yellow" title="Yellow"></div>
+          <div class="theme-dot" data-theme="light" title="Light (Classic)"></div>
+        </div>
+      </div>
+      <div class="settings-card">
         <h3><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-3px;margin-right:6px"><path d="M21 2l-2 2m-7.61 7.61a5.5 5.5 0 1 1-7.778 7.778 5.5 5.5 0 0 1 7.777-7.777zm0 0L15.5 7.5m0 0l3 3L22 7l-3-3m-3.5 3.5L19 4"/></svg>API Key</h3>
         <p style="font-size:.85rem;color:var(--muted);margin-bottom:12px">Use this key in your projects to call MAC APIs from anywhere.</p>
         <div class="api-key-box">
@@ -947,6 +1011,18 @@ async function renderSettings() {
     </div>`;
 
   bindEyeToggles(el);
+
+  // Theme picker
+  const currentTheme = localStorage.getItem('mac_theme') || 'warm';
+  document.querySelectorAll('#theme-picker .theme-dot').forEach(dot => {
+    if (dot.dataset.theme === currentTheme) dot.classList.add('active');
+    dot.onclick = () => {
+      const theme = dot.dataset.theme;
+      applyTheme(theme);
+      document.querySelectorAll('#theme-picker .theme-dot').forEach(d => d.classList.remove('active'));
+      dot.classList.add('active');
+    };
+  });
 
   document.getElementById('save-profile-btn').onclick = async () => {
     const msg = document.getElementById('pf-msg');
@@ -1498,6 +1574,14 @@ async function renderAdmin() {
         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/><path d="M16 13H8"/><path d="M16 17H8"/><path d="M10 9H8"/></svg>
         <span>Audit Log</span>
       </div>
+      <div class="admin-tab ${adminTab==='guardrails'?'active':''}" data-tab="guardrails">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><line x1="9" y1="12" x2="15" y2="12"/><line x1="12" y1="9" x2="12" y2="15"/></svg>
+        <span>Guardrails</span>
+      </div>
+      <div class="admin-tab ${adminTab==='activity'?'active':''}" data-tab="activity">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg>
+        <span>Live Activity</span>
+      </div>
     </div>
     <div id="admin-content"><div class="loading-state"><div class="spinner"></div><span>Loading...</span></div></div>
   `;
@@ -1512,6 +1596,8 @@ async function renderAdmin() {
   else if (adminTab === 'cluster') await renderAdminCluster();
   else if (adminTab === 'scoped_keys') await renderAdminScopedKeys();
   else if (adminTab === 'audit') await renderAdminAuditLog();
+  else if (adminTab === 'guardrails') await renderAdminGuardrails();
+  else if (adminTab === 'activity') await renderAdminActivityStream();
 }
 
 async function renderAdminOverview() {
@@ -1904,7 +1990,8 @@ async function renderAdminRegistry() {
         <h2>Student Registry <span class="badge" style="background:#eee;color:#000;font-size:.75rem;vertical-align:middle">${entries.length}</span></h2>
         <div style="display:flex;gap:8px;flex-wrap:wrap">
           <button class="btn btn-sm btn-outline" id="add-reg-btn">+ Add Student</button>
-          <button class="btn btn-sm btn-primary" id="bulk-reg-btn">Bulk Import</button>
+          <button class="btn btn-sm btn-primary" id="bulk-reg-btn">Bulk Import (JSON)</button>
+          <button class="btn btn-sm btn-primary" id="upload-reg-btn" style="background:var(--accent)">Upload CSV / JSON File</button>
         </div>
       </div>
       <p style="font-size:.85rem;color:var(--muted);margin-bottom:16px">College database. Students verify against this to create accounts.</p>
@@ -1996,6 +2083,74 @@ async function renderAdminRegistry() {
           res.innerHTML = `<span style="color:var(--success)">${esc(r.message)}</span>` +
             (r.errors?.length ? `<br><span style="color:var(--danger)">Errors: ${r.errors.join(', ')}</span>` : '');
         } catch (ex) { err.textContent = ex.message; }
+      };
+    };
+
+    document.getElementById('upload-reg-btn').onclick = () => {
+      const overlay = document.createElement('div');
+      overlay.className = 'modal-overlay';
+      overlay.innerHTML = `
+        <div class="modal">
+          <h3>Upload Student List (CSV or JSON)</h3>
+          <p style="font-size:.85rem;color:var(--muted);margin-bottom:8px">CSV columns: <code>roll_number, name, department, dob, batch_year</code></p>
+          <p style="font-size:.85rem;color:var(--muted);margin-bottom:12px">JSON: array of objects or <code>{"students": [...]}</code></p>
+          <div class="copycheck-upload-area" id="reg-file-drop" style="padding:32px;text-align:center;border:2px dashed var(--border);border-radius:8px;cursor:pointer;margin-bottom:12px">
+            <p style="margin:0;font-size:.95rem">Drag & drop or click to select file</p>
+            <p style="margin:4px 0 0;font-size:.8rem;color:var(--muted)">.csv or .json (max 5MB)</p>
+            <input type="file" id="reg-file-input" accept=".csv,.json" style="display:none">
+          </div>
+          <div id="reg-file-name" style="font-size:.85rem;margin-bottom:8px"></div>
+          <div id="reg-upload-error" style="color:var(--danger);font-size:.85rem;min-height:20px"></div>
+          <div id="reg-upload-result" style="font-size:.85rem;min-height:20px"></div>
+          <div class="modal-actions">
+            <button class="btn btn-sm btn-outline" id="reg-upload-cancel">Cancel</button>
+            <button class="btn btn-sm btn-primary" id="reg-upload-submit" style="width:auto;padding:8px 20px" disabled>Upload</button>
+          </div>
+        </div>`;
+      document.body.appendChild(overlay);
+      const fileInput = overlay.querySelector('#reg-file-input');
+      const dropArea = overlay.querySelector('#reg-file-drop');
+      let selectedFile = null;
+
+      dropArea.onclick = () => fileInput.click();
+      dropArea.ondragover = (e) => { e.preventDefault(); dropArea.classList.add('dragover'); };
+      dropArea.ondragleave = () => dropArea.classList.remove('dragover');
+      dropArea.ondrop = (e) => { e.preventDefault(); dropArea.classList.remove('dragover'); if (e.dataTransfer.files[0]) pickFile(e.dataTransfer.files[0]); };
+      fileInput.onchange = () => { if (fileInput.files[0]) pickFile(fileInput.files[0]); };
+
+      function pickFile(f) {
+        if (!f.name.match(/\.(csv|json)$/i)) { overlay.querySelector('#reg-upload-error').textContent = 'Only .csv or .json files'; return; }
+        if (f.size > 5*1024*1024) { overlay.querySelector('#reg-upload-error').textContent = 'File too large (max 5MB)'; return; }
+        selectedFile = f;
+        overlay.querySelector('#reg-file-name').textContent = f.name + ' (' + (f.size/1024).toFixed(1) + ' KB)';
+        overlay.querySelector('#reg-upload-error').textContent = '';
+        overlay.querySelector('#reg-upload-submit').disabled = false;
+      }
+
+      overlay.querySelector('#reg-upload-cancel').onclick = () => overlay.remove();
+      overlay.onclick = (e) => { if (e.target === overlay) overlay.remove(); };
+      overlay.querySelector('#reg-upload-submit').onclick = async () => {
+        if (!selectedFile) return;
+        const err = overlay.querySelector('#reg-upload-error');
+        const res = overlay.querySelector('#reg-upload-result');
+        err.textContent = ''; res.textContent = 'Uploading...';
+        const submitBtn = overlay.querySelector('#reg-upload-submit');
+        submitBtn.disabled = true;
+        try {
+          const form = new FormData();
+          form.append('file', selectedFile);
+          const tok = localStorage.getItem('mac_token');
+          const r = await fetch(API + '/auth/admin/registry/upload', {
+            method: 'POST',
+            headers: tok ? { 'Authorization': 'Bearer ' + tok } : {},
+            body: form,
+          });
+          const data = await r.json();
+          if (!r.ok) { err.textContent = data.detail || 'Upload failed'; res.textContent = ''; submitBtn.disabled = false; return; }
+          res.innerHTML = '<span style="color:var(--success)">' + esc(data.message) + '</span>' +
+            (data.errors?.length ? '<br><span style="color:var(--danger)">Errors: ' + data.errors.join(', ') + '</span>' : '');
+          setTimeout(() => { overlay.remove(); renderAdmin(); }, 2000);
+        } catch (ex) { err.textContent = ex.message; res.textContent = ''; submitBtn.disabled = false; }
       };
     };
   } catch (ex) { el.innerHTML = `<div class="error-state"><p>Error: ${esc(ex.message)}</p></div>`; }
@@ -2133,8 +2288,228 @@ async function renderAdminAuditLog() {
 }
 
 /* ═══════════════════════════════════════════════════════════
-   DOUBTS PAGE — Student Questions to Faculty
+   ADMIN — Guardrails Control Panel
    ═══════════════════════════════════════════════════════════ */
+async function renderAdminGuardrails() {
+  const el = document.getElementById('admin-content');
+  el.innerHTML = `<div class="admin-header">
+    <div><h2>Guardrails</h2><p class="muted" style="margin:0">Control AI safety filters in real time. Changes take effect immediately.</p></div>
+    <button class="btn btn-primary" id="gr-add-btn" style="width:auto;padding:8px 16px">+ Add Rule</button>
+  </div>
+  <div id="gr-rules-list"><div class="loading-state"><div class="spinner"></div><span>Loading rules…</span></div></div>`;
+
+  document.getElementById('gr-add-btn').onclick = () => showAddGuardrailModal();
+  await loadGuardrailRules();
+}
+
+async function loadGuardrailRules() {
+  const el = document.getElementById('gr-rules-list');
+  if (!el) return;
+  try {
+    const data = await apiJson('/guardrails/rules');
+    const rules = data.rules || [];
+    const cats = [...new Set(rules.map(r => r.category))].sort();
+    const actionColors = {block:'#ef4444',flag:'#f97316',redact:'#7c3aed',log:'#3b82f6'};
+    el.innerHTML = cats.map(cat => `
+      <div class="gr-category">
+        <div class="gr-cat-header">${esc(cat)}</div>
+        ${rules.filter(r => r.category === cat).map(rule => `
+          <div class="gr-rule-row ${rule.enabled ? '' : 'disabled'}" data-rule-id="${rule.id}">
+            <div class="gr-rule-left">
+              <label class="gr-toggle">
+                <input type="checkbox" class="gr-toggle-input" data-rule-id="${rule.id}" ${rule.enabled ? 'checked' : ''}>
+                <span class="gr-toggle-slider"></span>
+              </label>
+              <div class="gr-rule-info">
+                <span class="gr-rule-desc">${esc(rule.description || rule.pattern)}</span>
+                <code class="gr-rule-pattern muted">${esc(rule.pattern)}</code>
+              </div>
+            </div>
+            <div class="gr-rule-right">
+              <span class="badge" style="background:${actionColors[rule.action]||'#888'}20;color:${actionColors[rule.action]||'#888'};border:1px solid ${actionColors[rule.action]||'#888'}40">${esc(rule.action)}</span>
+              <span class="gr-rule-priority muted" title="Priority">${rule.priority}</span>
+              <button class="icon-btn gr-delete-btn" data-rule-id="${rule.id}" title="Delete rule">&times;</button>
+            </div>
+          </div>`).join('')}
+      </div>`).join('');
+
+    // Bind toggles
+    el.querySelectorAll('.gr-toggle-input').forEach(cb => {
+      cb.onchange = async () => {
+        const ruleId = cb.dataset.ruleId;
+        cb.disabled = true;
+        try {
+          await api(`/guardrails/rules/${ruleId}/toggle`, { method: 'PATCH' });
+          const row = el.querySelector(`.gr-rule-row[data-rule-id="${ruleId}"]`);
+          if (row) row.classList.toggle('disabled', !cb.checked);
+          showToast(cb.checked ? 'Rule enabled' : 'Rule disabled', 'success');
+        } catch(ex) { cb.checked = !cb.checked; showToast('Failed: ' + ex.message, 'error'); }
+        cb.disabled = false;
+      };
+    });
+
+    // Bind delete buttons
+    el.querySelectorAll('.gr-delete-btn').forEach(btn => {
+      btn.onclick = async () => {
+        if (!confirm('Delete this guardrail rule?')) return;
+        const ruleId = btn.dataset.ruleId;
+        try {
+          await api(`/guardrails/rules/${ruleId}`, { method: 'DELETE' });
+          showToast('Rule deleted', 'success');
+          await loadGuardrailRules();
+        } catch(ex) { showToast('Failed: ' + ex.message, 'error'); }
+      };
+    });
+  } catch(ex) { el.innerHTML = `<div class="error-state"><p>Error: ${esc(ex.message)}</p></div>`; }
+}
+
+function showAddGuardrailModal() {
+  showModal({
+    title: 'Add Guardrail Rule',
+    body: `
+      <div class="form-row">
+        <div class="form-group" style="flex:1"><label>Category</label>
+          <input id="gr-new-cat" class="form-input" placeholder="e.g. prompt_injection, harmful, custom"></div>
+        <div class="form-group" style="flex:1"><label>Action</label>
+          <select id="gr-new-action" class="form-input">
+            <option value="block">block</option>
+            <option value="flag">flag</option>
+            <option value="redact">redact</option>
+            <option value="log">log</option>
+          </select></div>
+      </div>
+      <div class="form-group"><label>Pattern (regex)</label>
+        <input id="gr-new-pattern" class="form-input" placeholder="e.g. ignore.*previous|jailbreak"></div>
+      <div class="form-group"><label>Description</label>
+        <input id="gr-new-desc" class="form-input" placeholder="Human-readable description"></div>
+      <div class="form-row">
+        <div class="form-group" style="flex:1"><label>Priority</label>
+          <input id="gr-new-priority" class="form-input" type="number" value="100" min="1" max="999"></div>
+        <div class="form-group" style="flex:1;align-self:flex-end"><label style="display:flex;align-items:center;gap:8px;cursor:pointer">
+          <input id="gr-new-enabled" type="checkbox" checked> Enabled</label></div>
+      </div>`,
+    confirmText: 'Add Rule',
+    onConfirm: async () => {
+      const pattern = document.getElementById('gr-new-pattern').value.trim();
+      if (!pattern) { showToast('Pattern is required', 'error'); return false; }
+      const body = {
+        category: document.getElementById('gr-new-cat').value.trim() || 'custom',
+        action: document.getElementById('gr-new-action').value,
+        pattern,
+        description: document.getElementById('gr-new-desc').value.trim(),
+        priority: parseInt(document.getElementById('gr-new-priority').value) || 100,
+        enabled: document.getElementById('gr-new-enabled').checked,
+      };
+      const r = await api('/guardrails/rules', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body) });
+      if (!r.ok) { const d = await r.json(); showToast(d.detail || 'Failed', 'error'); return false; }
+      showToast('Rule added', 'success');
+      closeModal();
+      await loadGuardrailRules();
+    },
+  });
+}
+
+/* ═══════════════════════════════════════════════════════════
+   ADMIN — Live Activity Stream (SSE)
+   ═══════════════════════════════════════════════════════════ */
+let _activityEs = null;
+let _activityLog = [];
+
+async function renderAdminActivityStream() {
+  const el = document.getElementById('admin-content');
+  el.innerHTML = `<div class="admin-header">
+    <div><h2>Live Activity</h2><p class="muted" style="margin:0">Real-time audit events streamed from the server.</p></div>
+    <div style="display:flex;align-items:center;gap:10px">
+      <span id="activity-status-dot" class="status-dot offline" title="Disconnected"></span>
+      <span id="activity-status-label" class="muted" style="font-size:.8rem">Connecting…</span>
+      <button class="btn btn-sm btn-outline" id="activity-clear-btn">Clear</button>
+    </div>
+  </div>
+  <div class="activity-feed" id="activity-feed">
+    <div class="loading-state"><div class="spinner"></div><span>Connecting to live stream…</span></div>
+  </div>`;
+
+  document.getElementById('activity-clear-btn').onclick = () => {
+    _activityLog = [];
+    renderActivityFeed();
+  };
+
+  // Disconnect any previous SSE connection
+  if (_activityEs) { _activityEs.close(); _activityEs = null; }
+
+  const token = state.token || '';
+  const url = `/api/v1/notifications/activity-stream?token=${encodeURIComponent(token)}`;
+  _activityEs = new EventSource(url);
+
+  _activityEs.onopen = () => {
+    document.getElementById('activity-status-dot')?.classList.replace('offline', 'online');
+    document.getElementById('activity-status-label').textContent = 'Live';
+  };
+
+  _activityEs.addEventListener('connected', (e) => {
+    const feed = document.getElementById('activity-feed');
+    if (feed) feed.innerHTML = '<p class="muted" style="padding:12px;font-size:.8rem">Waiting for activity…</p>';
+  });
+
+  _activityEs.addEventListener('activity', (e) => {
+    try {
+      const entry = JSON.parse(e.data);
+      _activityLog.unshift(entry);
+      if (_activityLog.length > 200) _activityLog.pop();
+      renderActivityFeed();
+    } catch {}
+  });
+
+  _activityEs.addEventListener('error', (e) => {
+    try {
+      const entry = JSON.parse(e.data);
+      const feed = document.getElementById('activity-feed');
+      if (feed) feed.innerHTML = `<div class="error-state"><p>${esc(entry.detail || 'Stream error')}</p></div>`;
+    } catch {}
+  });
+
+  _activityEs.onerror = () => {
+    document.getElementById('activity-status-dot')?.classList.replace('online', 'offline');
+    const labelEl = document.getElementById('activity-status-label');
+    if (labelEl) labelEl.textContent = 'Reconnecting…';
+  };
+
+  // Cleanup when admin tab changes
+  const tabObserver = new MutationObserver(() => {
+    if (!document.getElementById('activity-feed')) {
+      if (_activityEs) { _activityEs.close(); _activityEs = null; }
+      tabObserver.disconnect();
+    }
+  });
+  const adminContent = document.getElementById('admin-content');
+  if (adminContent) tabObserver.observe(adminContent, { childList: true });
+}
+
+function renderActivityFeed() {
+  const feed = document.getElementById('activity-feed');
+  if (!feed) return;
+  if (_activityLog.length === 0) {
+    feed.innerHTML = '<p class="muted" style="padding:12px;font-size:.8rem">No activity yet.</p>';
+    return;
+  }
+  const actionColors = {
+    'copy_check': '#7c3aed', 'auth': '#3b82f6', 'admin': '#ef4444',
+    'query': '#22c55e', 'system': '#888',
+  };
+  feed.innerHTML = _activityLog.map(entry => {
+    const catKey = (entry.action || '').split('.')[0];
+    const color = actionColors[catKey] || '#888';
+    return `<div class="activity-entry">
+      <span class="activity-dot" style="background:${color}"></span>
+      <div class="activity-body">
+        <span class="activity-action">${esc(entry.action || '')}</span>
+        <span class="activity-meta muted">${esc(entry.actor_role || '')} · ${esc(entry.resource_type || '')}</span>
+        ${entry.details ? `<span class="activity-details muted">${esc((entry.details || '').slice(0, 120))}</span>` : ''}
+      </div>
+      <span class="activity-time muted">${entry.created_at ? timeAgo(entry.created_at) : ''}</span>
+    </div>`;
+  }).join('');
+}
 let doubtView = 'list';
 let doubtDetailId = null;
 let doubtFilter = 'all';
@@ -2290,248 +2665,1013 @@ function showNewDoubtModal() {
 }
 
 /* ═══════════════════════════════════════════════════════════
-   ATTENDANCE PAGE — Faculty/Admin Session Management
+   ATTENDANCE PAGE — Student Mark / Faculty+Admin Manage
    ═══════════════════════════════════════════════════════════ */
+let _attdCameraStream = null;
+let _attdLivenessState = { blinkDetected: false, eyeCenter: false, frameCount: 0, passedChecks: 0 };
+
+function _stopAttdCamera() {
+  if (_attdCameraStream) {
+    _attdCameraStream.getTracks().forEach(t => t.stop());
+    _attdCameraStream = null;
+  }
+}
+
 async function renderAttendance() {
   const el = document.getElementById('page-content');
+  const u = state.user || {};
+  _stopAttdCamera();
+  if (u.role === 'student') {
+    await renderStudentAttendance(el);
+  } else {
+    await renderFacultyAttendance(el);
+  }
+}
+
+/* ── Student Attendance: Face capture + liveness ────────── */
+async function renderStudentAttendance(el) {
   el.innerHTML = '<div class="loading-state"><div class="spinner"></div><span>Loading attendance...</span></div>';
   try {
-    const data = await apiJson('/attendance/sessions');
-    const sessions = data.sessions || [];
+    // Fetch face status + today's sessions with already_marked info in one go
+    const [faceStatus, todayData] = await Promise.all([
+      apiJson('/attendance/face-status'),
+      apiJson('/attendance/my-today'),
+    ]);
+    const sessions = todayData.sessions || [];
+    const liveSessions = sessions.filter(s => s.is_open);
+    const windowOpen = todayData.window_open;
+    const windowStr = todayData.window || '';
+
     el.innerHTML = `
-      <div class="admin-header">
-        <h2>Attendance Sessions</h2>
-        <button class="btn btn-sm btn-primary" id="new-attd-btn" style="width:auto;padding:8px 16px">+ New Session</button>
-      </div>
-      ${sessions.length === 0 ? '<div class="empty-state"><p>No attendance sessions yet. Create one to start tracking.</p></div>' :
-        sessions.map(s => `
-          <div class="attendance-session-card">
-            <div class="attd-info">
-              <div class="attd-title">${esc(s.title)}</div>
-              <div class="attd-sub">${esc(s.department || '')}${s.subject ? ' · ' + esc(s.subject) : ''} · ${new Date(s.session_date).toLocaleDateString()}</div>
-            </div>
-            <span class="attd-badge ${s.is_open ? 'live' : 'closed'}">${s.is_open ? 'LIVE' : 'CLOSED'}</span>
-            <div style="display:flex;gap:6px">
-              ${s.is_open ? `<button class="btn btn-sm btn-outline close-session" data-id="${s.id}">Close</button>` : ''}
-              <button class="btn btn-sm btn-outline view-report" data-id="${s.id}">Report</button>
-            </div>
+      <div class="attendance-student-page">
+        <div class="attd-student-header">
+          <h2>Mark Attendance</h2>
+          <div class="attd-window-badge ${windowOpen ? 'open' : 'closed'}">
+            <span class="attd-window-dot"></span>
+            Window ${windowOpen ? 'Open' : 'Closed'} &nbsp;·&nbsp; ${esc(windowStr)}
           </div>
-        `).join('')}`;
+        </div>
 
-    document.getElementById('new-attd-btn').onclick = () => {
-      const overlay = document.createElement('div');
-      overlay.className = 'modal-overlay';
-      overlay.innerHTML = `
-        <div class="modal">
-          <h3>New Attendance Session</h3>
-          <div class="field"><label>Title</label><input id="attd-title" placeholder="e.g. DSA Lab - Section A"></div>
-          <div class="field"><label>Department</label>
-            <select id="attd-dept"><option>CSE</option><option>ECE</option><option>ME</option><option>CE</option><option>EE</option><option>IT</option></select>
+        <!-- Face Registration Status -->
+        <div class="attd-face-status ${faceStatus.registered ? 'registered' : 'not-registered'}">
+          <div class="attd-face-icon" style="flex-shrink:0;display:flex;align-items:center">
+            ${faceStatus.registered
+              ? '<svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="var(--success)" stroke-width="2"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>'
+              : '<svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="var(--danger)" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="15" y1="9" x2="9" y2="15"/><line x1="9" y1="9" x2="15" y2="15"/></svg>'}
           </div>
-          <div class="field"><label>Subject</label>
-            <select id="attd-subject"><option value="AI">AI</option><option value="CSE">CSE</option><option value="IT">IT</option><option value="">Other</option></select>
+          <div class="attd-face-text">
+            <strong>${faceStatus.registered ? 'Face Registered' : 'Face Not Registered'}</strong>
+            <p class="muted" style="margin:0;font-size:.78rem">${faceStatus.registered
+              ? 'Last updated: ' + (faceStatus.captured_at ? timeAgo(faceStatus.captured_at) : 'N/A')
+              : 'Register before marking attendance.'}</p>
           </div>
-          <div id="attd-error" style="color:var(--danger);font-size:.85rem;min-height:20px"></div>
-          <div class="modal-actions">
-            <button class="btn btn-sm btn-outline" id="attd-cancel">Cancel</button>
-            <button class="btn btn-sm btn-primary" id="attd-submit" style="width:auto;padding:8px 20px">Create</button>
-          </div>
-        </div>`;
-      document.body.appendChild(overlay);
-      overlay.querySelector('#attd-cancel').onclick = () => overlay.remove();
-      overlay.onclick = (e) => { if (e.target === overlay) overlay.remove(); };
-      overlay.querySelector('#attd-submit').onclick = async () => {
-        const err = overlay.querySelector('#attd-error');
-        err.textContent = '';
-        // Check time — attendance only allowed 12:00 AM to 12:00 PM
-        const now = new Date();
-        const hour = now.getHours();
-        if (hour >= 12) {
-          err.textContent = 'Attendance sessions can only be created before 12:00 PM (noon)';
-          return;
-        }
-        const body = {
-          title: overlay.querySelector('#attd-title').value.trim(),
-          department: overlay.querySelector('#attd-dept').value,
-          subject: overlay.querySelector('#attd-subject').value || null,
-          session_date: new Date().toISOString().slice(0, 10),
-        };
-        if (!body.title) { err.textContent = 'Title is required'; return; }
-        try {
-          const r = await api('/attendance/sessions', { method: 'POST', body: JSON.stringify(body) });
-          if (!r.ok) { const d = await r.json(); err.textContent = (typeof d.detail === 'string' ? d.detail : d.detail?.message) || 'Failed'; return; }
-          overlay.remove();
-          renderAttendance();
-        } catch (ex) { err.textContent = ex.message; }
-      };
-    };
+          <button class="btn btn-sm ${faceStatus.registered ? 'btn-outline' : 'btn-primary'}" id="attd-register-face-btn">
+            ${faceStatus.registered ? 'Update Face' : 'Register Face'}
+          </button>
+        </div>
 
-    el.querySelectorAll('.close-session').forEach(btn => {
-      btn.onclick = async () => {
-        try { await api('/attendance/sessions/' + btn.dataset.id + '/close', { method: 'POST' }); renderAttendance(); } catch { alert('Failed'); }
-      };
-    });
-    el.querySelectorAll('.view-report').forEach(btn => {
-      btn.onclick = async () => {
-        try {
-          const data = await apiJson('/attendance/sessions/' + btn.dataset.id + '/report');
-          const records = data.records || [];
-          const overlay = document.createElement('div');
-          overlay.className = 'modal-overlay';
-          overlay.innerHTML = `
-            <div class="modal" style="max-width:600px">
-              <h3>Attendance Report</h3>
-              ${records.length === 0 ? '<p class="muted">No attendance records.</p>' : `
-              <div class="table-responsive">
-              <table class="data-table">
-                <thead><tr><th>Roll No</th><th>Name</th><th>Verified</th><th>Confidence</th><th>Time</th></tr></thead>
-                <tbody>
-                  ${records.map(r => `
-                    <tr>
-                      <td class="mono bold">${esc(r.roll_number || '')}</td>
-                      <td>${esc(r.name || '')}</td>
-                      <td>${r.face_verified ? '<span class="dot-success"></span> Yes' : '<span class="dot-error"></span> No'}</td>
-                      <td>${r.face_match_confidence ? (r.face_match_confidence * 100).toFixed(0) + '%' : '-'}</td>
-                      <td class="muted">${r.created_at ? timeAgo(r.created_at) : '-'}</td>
-                    </tr>
-                  `).join('')}
-                </tbody>
-              </table>
-              </div>`}
-              <div class="modal-actions"><button class="btn btn-sm btn-outline" onclick="this.closest('.modal-overlay').remove()">Close</button></div>
-            </div>`;
-          document.body.appendChild(overlay);
-          overlay.onclick = (e) => { if (e.target === overlay) overlay.remove(); };
-        } catch (ex) { alert('Failed: ' + ex.message); }
-      };
+        <!-- Live Sessions -->
+        <div style="display:flex;align-items:center;gap:8px;margin-top:20px;margin-bottom:8px">
+          <h3 style="margin:0;font-size:1rem;font-weight:700">Today's Sessions</h3>
+          <span style="padding:2px 8px;border-radius:20px;background:${liveSessions.length > 0 ? 'var(--success)' : 'var(--muted)'};color:#fff;font-size:.72rem;font-weight:700">${liveSessions.length} live</span>
+        </div>
+        ${sessions.length === 0
+          ? '<div class="empty-state"><svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="var(--muted)" stroke-width="1.5"><rect x="3" y="4" width="18" height="18" rx="2"/><line x1="3" y1="10" x2="21" y2="10"/></svg><p>No sessions today.</p><p class="muted">Check back during class hours.</p></div>'
+          : `<div class="attd-sessions-grid">${sessions.map(s => {
+              const marked = s.already_marked;
+              const isLive = s.is_open;
+              return `
+              <div class="attd-session-card-student ${marked ? 'marked' : ''} ${!isLive ? 'closed' : ''}">
+                <div class="attd-session-live-dot ${marked ? 'marked-dot' : isLive ? '' : 'closed-dot'}"></div>
+                <div class="attd-session-info">
+                  <div class="attd-title">${esc(s.title)}</div>
+                  <div class="attd-sub">${esc(s.department || '')}${s.subject ? ' · ' + esc(s.subject) : ''}</div>
+                </div>
+                ${marked
+                  ? `<div class="attd-marked-badge"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="20 6 9 17 4 12"/></svg> Marked</div>`
+                  : isLive
+                    ? `<button class="btn btn-primary btn-sm attd-mark-btn" data-session-id="${s.id}" data-session-title="${esc(s.title)}" ${!faceStatus.registered ? 'disabled title="Register face first"' : ''}>
+                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/><circle cx="12" cy="13" r="4"/></svg>
+                        Mark
+                       </button>`
+                    : `<span style="font-size:.75rem;color:var(--muted);padding:4px 10px;border-radius:20px;background:var(--bg)">Closed</span>`}
+              </div>`;
+            }).join('')}</div>`}
+      </div>`;
+
+    // Bind register face
+    document.getElementById('attd-register-face-btn').onclick = () => showFaceCaptureModal('register');
+
+    // Bind mark attendance buttons
+    el.querySelectorAll('.attd-mark-btn').forEach(btn => {
+      btn.onclick = () => showFaceCaptureModal('mark', btn.dataset.sessionId, btn.dataset.sessionTitle);
     });
   } catch (ex) { el.innerHTML = `<div class="error-state"><p>Error: ${esc(ex.message)}</p></div>`; }
 }
 
+/* ── Face Capture Modal with Liveness Detection ──────────── */
+function showFaceCaptureModal(mode, sessionId, sessionTitle) {
+  _stopAttdCamera();
+  _attdLivenessState = { blinkDetected: false, eyeCenter: false, frameCount: 0, passedChecks: 0, capturedImage: null };
+
+  const overlay = document.createElement('div');
+  overlay.className = 'modal-overlay';
+  overlay.innerHTML = `
+    <div class="modal face-capture-modal" style="max-width:520px">
+      <h3>${mode === 'register' ? 'Register Your Face' : 'Mark Attendance'}</h3>
+      ${mode === 'mark' ? `<p class="muted" style="margin-bottom:12px">Session: <strong>${sessionTitle || ''}</strong></p>` : ''}
+      <div class="face-capture-container">
+        <div class="face-camera-wrapper">
+          <video id="face-video" autoplay playsinline muted></video>
+          <canvas id="face-canvas" style="display:none"></canvas>
+          <div class="face-oval-guide"></div>
+          <div class="face-guide-text" id="face-guide-text">Initializing camera...</div>
+        </div>
+        <div class="liveness-checks" id="liveness-checks">
+          <div class="liveness-check" id="lc-face"><span class="lc-icon">⏳</span> Face detected in frame</div>
+          <div class="liveness-check" id="lc-eyes"><span class="lc-icon">⏳</span> Eyes looking at camera</div>
+          <div class="liveness-check" id="lc-still"><span class="lc-icon">⏳</span> Hold still for capture</div>
+        </div>
+      </div>
+      <div id="face-capture-preview" style="display:none">
+        <img id="face-preview-img" style="width:100%;border-radius:12px;margin:8px 0">
+        <p style="text-align:center;color:var(--success);font-weight:600" id="face-preview-msg">Photo captured!</p>
+      </div>
+      <div id="face-error" style="color:var(--danger);font-size:.85rem;min-height:20px;text-align:center"></div>
+      <div class="modal-actions">
+        <button class="btn btn-sm btn-outline" id="face-cancel">Cancel</button>
+        <button class="btn btn-sm btn-outline" id="face-retake" style="display:none">Retake</button>
+        <button class="btn btn-sm btn-primary" id="face-submit" style="display:none;width:auto;padding:8px 24px">
+          ${mode === 'register' ? 'Register Face' : 'Submit Attendance'}
+        </button>
+      </div>
+    </div>`;
+  document.body.appendChild(overlay);
+
+  const video = overlay.querySelector('#face-video');
+  const canvas = overlay.querySelector('#face-canvas');
+  const guideText = overlay.querySelector('#face-guide-text');
+  const previewArea = overlay.querySelector('#face-capture-preview');
+  const previewImg = overlay.querySelector('#face-preview-img');
+  const previewMsg = overlay.querySelector('#face-preview-msg');
+  const submitBtn = overlay.querySelector('#face-submit');
+  const retakeBtn = overlay.querySelector('#face-retake');
+  const errorEl = overlay.querySelector('#face-error');
+  const lcFace = overlay.querySelector('#lc-face');
+  const lcEyes = overlay.querySelector('#lc-eyes');
+  const lcStill = overlay.querySelector('#lc-still');
+
+  let livenessIv = null;
+  let capturedDataUrl = null;
+  let videoReady = false;
+
+  function setCheck(el, status) {
+    const icon = el.querySelector('.lc-icon');
+    if (status === 'pass') { icon.textContent = '✅'; el.classList.add('passed'); el.classList.remove('fail'); }
+    else if (status === 'fail') { icon.textContent = '❌'; el.classList.add('fail'); el.classList.remove('passed'); }
+    else { icon.textContent = '⏳'; el.classList.remove('passed', 'fail'); }
+  }
+
+  // Start camera
+  navigator.mediaDevices.getUserMedia({ video: { facingMode: 'user', width: { ideal: 640 }, height: { ideal: 480 } }, audio: false })
+    .then(stream => {
+      _attdCameraStream = stream;
+      video.srcObject = stream;
+      video.onloadedmetadata = () => {
+        videoReady = true;
+        canvas.width = video.videoWidth;
+        canvas.height = video.videoHeight;
+        guideText.textContent = 'Position your face in the oval';
+        startLivenessDetection();
+      };
+    })
+    .catch(err => {
+      guideText.textContent = 'Camera access denied';
+      errorEl.textContent = 'Please allow camera access to continue. Error: ' + err.message;
+    });
+
+  function startLivenessDetection() {
+    let stableFrames = 0;
+    let faceDetected = false;
+    const REQUIRED_STABLE = 25; // ~2.5 seconds at 10fps
+
+    livenessIv = setInterval(() => {
+      if (!videoReady || !_attdCameraStream) return;
+      _attdLivenessState.frameCount++;
+
+      // Draw to canvas for analysis
+      const ctx = canvas.getContext('2d');
+      ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+      const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+
+      // Simple face-area brightness analysis (center oval region)
+      const cx = canvas.width / 2, cy = canvas.height / 2;
+      const rx = canvas.width * 0.25, ry = canvas.height * 0.35;
+      let skinPixels = 0, totalPixels = 0, brightnessSum = 0;
+      const d = imageData.data;
+
+      for (let y = Math.floor(cy - ry); y < Math.floor(cy + ry); y += 3) {
+        for (let x = Math.floor(cx - rx); x < Math.floor(cx + rx); x += 3) {
+          // Check if inside oval
+          const dx = (x - cx) / rx, dy = (y - cy) / ry;
+          if (dx * dx + dy * dy > 1) continue;
+          totalPixels++;
+          const i = (y * canvas.width + x) * 4;
+          const r = d[i], g = d[i + 1], b = d[i + 2];
+          brightnessSum += (r + g + b) / 3;
+          // Simple skin-tone detection (works across skin tones)
+          if (r > 60 && g > 40 && b > 20 && r > b && (r - g) < 80 && (Math.max(r, g, b) - Math.min(r, g, b)) < 130) {
+            skinPixels++;
+          }
+        }
+      }
+
+      const skinRatio = totalPixels > 0 ? skinPixels / totalPixels : 0;
+      const avgBrightness = totalPixels > 0 ? brightnessSum / totalPixels : 0;
+      faceDetected = skinRatio > 0.2 && avgBrightness > 40 && avgBrightness < 240;
+
+      // Check 1: Face in frame
+      if (faceDetected) {
+        setCheck(lcFace, 'pass');
+      } else {
+        setCheck(lcFace, 'fail');
+        stableFrames = 0;
+        guideText.textContent = 'Position your face in the oval';
+        return;
+      }
+
+      // Check 2: Eyes looking at camera (center of face region has expected brightness variance)
+      const eyeRegionY = cy - ry * 0.2;
+      let eyeVariance = 0, eyePixels = 0;
+      for (let y = Math.floor(eyeRegionY - 20); y < Math.floor(eyeRegionY + 20); y += 2) {
+        for (let x = Math.floor(cx - rx * 0.5); x < Math.floor(cx + rx * 0.5); x += 2) {
+          eyePixels++;
+          const i = (y * canvas.width + x) * 4;
+          const bright = (d[i] + d[i + 1] + d[i + 2]) / 3;
+          eyeVariance += Math.abs(bright - avgBrightness);
+        }
+      }
+      const eyeContrast = eyePixels > 0 ? eyeVariance / eyePixels : 0;
+      const eyesOk = eyeContrast > 8; // Eyes have noticeable contrast (irises/pupils)
+
+      if (eyesOk && faceDetected) {
+        setCheck(lcEyes, 'pass');
+        _attdLivenessState.eyeCenter = true;
+      } else {
+        setCheck(lcEyes, 'fail');
+        stableFrames = 0;
+        guideText.textContent = 'Look directly at the camera';
+        return;
+      }
+
+      // Check 3: Hold still
+      stableFrames++;
+      const progress = Math.min(100, Math.round((stableFrames / REQUIRED_STABLE) * 100));
+      guideText.textContent = `Hold still... ${progress}%`;
+      if (stableFrames >= REQUIRED_STABLE) {
+        setCheck(lcStill, 'pass');
+        // Auto-capture
+        clearInterval(livenessIv);
+        livenessIv = null;
+        capturePhoto();
+      } else {
+        setCheck(lcStill, 'pending');
+      }
+    }, 100);
+  }
+
+  function capturePhoto() {
+    const ctx = canvas.getContext('2d');
+    ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+    capturedDataUrl = canvas.toDataURL('image/jpeg', 0.85);
+    _attdLivenessState.capturedImage = capturedDataUrl;
+
+    // Show preview
+    video.parentElement.style.display = 'none';
+    overlay.querySelector('#liveness-checks').style.display = 'none';
+    previewArea.style.display = 'block';
+    previewImg.src = capturedDataUrl;
+    previewMsg.textContent = 'Photo captured! Review and submit.';
+    submitBtn.style.display = '';
+    retakeBtn.style.display = '';
+    guideText.textContent = '';
+    _stopAttdCamera();
+  }
+
+  retakeBtn.onclick = () => {
+    capturedDataUrl = null;
+    previewArea.style.display = 'none';
+    video.parentElement.style.display = '';
+    overlay.querySelector('#liveness-checks').style.display = '';
+    submitBtn.style.display = 'none';
+    retakeBtn.style.display = 'none';
+    errorEl.textContent = '';
+    setCheck(lcFace, 'pending'); setCheck(lcEyes, 'pending'); setCheck(lcStill, 'pending');
+    navigator.mediaDevices.getUserMedia({ video: { facingMode: 'user', width: { ideal: 640 }, height: { ideal: 480 } }, audio: false })
+      .then(stream => {
+        _attdCameraStream = stream;
+        video.srcObject = stream;
+        videoReady = true;
+        startLivenessDetection();
+      });
+  };
+
+  submitBtn.onclick = async () => {
+    if (!capturedDataUrl) return;
+    submitBtn.disabled = true;
+    submitBtn.textContent = 'Submitting...';
+    errorEl.textContent = '';
+    try {
+      if (mode === 'register') {
+        const r = await api('/attendance/register-face', {
+          method: 'POST',
+          body: JSON.stringify({ face_image_base64: capturedDataUrl }),
+        });
+        const d = await r.json();
+        if (!r.ok || !d.success) { errorEl.textContent = d.message || d.detail || 'Registration failed'; submitBtn.disabled = false; submitBtn.textContent = 'Register Face'; return; }
+        overlay.remove(); _stopAttdCamera();
+        renderAttendance();
+      } else {
+        const r = await api('/attendance/mark', {
+          method: 'POST',
+          body: JSON.stringify({ session_id: sessionId, face_image_base64: capturedDataUrl }),
+        });
+        const d = await r.json();
+        if (!r.ok || !d.success) { errorEl.textContent = d.message || d.detail || 'Attendance marking failed'; submitBtn.disabled = false; submitBtn.textContent = 'Submit Attendance'; return; }
+        overlay.remove(); _stopAttdCamera();
+        // Show success toast
+        showToast('Attendance marked successfully! Confidence: ' + ((d.confidence || 0.95) * 100).toFixed(0) + '%', 'success');
+        renderAttendance();
+      }
+    } catch (ex) {
+      errorEl.textContent = ex.message;
+      submitBtn.disabled = false;
+      submitBtn.textContent = mode === 'register' ? 'Register Face' : 'Submit Attendance';
+    }
+  };
+
+  overlay.querySelector('#face-cancel').onclick = () => { if (livenessIv) clearInterval(livenessIv); _stopAttdCamera(); overlay.remove(); };
+  overlay.onclick = (e) => { if (e.target === overlay) { if (livenessIv) clearInterval(livenessIv); _stopAttdCamera(); overlay.remove(); } };
+}
+
+function showToast(message, type) {
+  const toast = document.createElement('div');
+  toast.className = `toast toast-${type || 'info'}`;
+  toast.textContent = message;
+  toast.style.cssText = 'position:fixed;bottom:24px;left:50%;transform:translateX(-50%);padding:12px 24px;border-radius:10px;color:#fff;font-weight:600;z-index:100000;animation:fadeInUp .3s ease;max-width:90vw;text-align:center;' +
+    (type === 'success' ? 'background:#16a34a;' : type === 'error' ? 'background:#dc2626;' : 'background:#333;');
+  document.body.appendChild(toast);
+  setTimeout(() => { toast.style.opacity = '0'; toast.style.transition = 'opacity .3s'; setTimeout(() => toast.remove(), 300); }, 4000);
+}
+
+/**
+ * Generic modal helper.
+ * @param {Object} opts - { title, body (HTML string), confirmText, onConfirm (async fn, return false to keep open) }
+ */
+function showModal({ title, body, confirmText = 'Confirm', onConfirm } = {}) {
+  closeModal();
+  const overlay = document.createElement('div');
+  overlay.className = 'modal-overlay';
+  overlay.id = 'generic-modal-overlay';
+  overlay.innerHTML = `<div class="modal">
+    <div class="modal-header"><h3>${esc(title || '')}</h3><button class="icon-btn modal-close-btn">&times;</button></div>
+    <div class="modal-body">${body || ''}</div>
+    <div class="modal-actions">
+      <button class="btn btn-outline" id="gm-cancel-btn">Cancel</button>
+      <button class="btn btn-primary" id="gm-confirm-btn">${esc(confirmText)}</button>
+    </div>
+  </div>`;
+  document.body.appendChild(overlay);
+  overlay.querySelector('.modal-close-btn').onclick = closeModal;
+  overlay.querySelector('#gm-cancel-btn').onclick = closeModal;
+  overlay.onclick = (e) => { if (e.target === overlay) closeModal(); };
+  overlay.querySelector('#gm-confirm-btn').onclick = async () => {
+    const btn = overlay.querySelector('#gm-confirm-btn');
+    btn.disabled = true;
+    const result = onConfirm ? await onConfirm() : undefined;
+    if (result !== false) closeModal();
+    else btn.disabled = false;
+  };
+}
+
+function closeModal() {
+  document.getElementById('generic-modal-overlay')?.remove();
+}
+
+/* ── Faculty/Admin Attendance Management ─────────────────── */
+async function renderFacultyAttendance(el) {
+  const u = state.user || {};
+  const isAdmin = u.role === 'admin';
+  el.innerHTML = '<div class="loading-state"><div class="spinner"></div><span>Loading attendance...</span></div>';
+  try {
+    const [overview, settings] = await Promise.all([
+      apiJson('/attendance/admin/overview?per_page=50'),
+      apiJson('/attendance/settings'),
+    ]);
+    const sessions = overview.sessions || [];
+
+    el.innerHTML = `
+      <div class="attd-admin-page">
+        <!-- Header row -->
+        <div class="attd-admin-header">
+          <div>
+            <h2>Attendance</h2>
+            <div class="attd-window-badge ${settings.window_open_now ? 'open' : 'closed'}">
+              <span class="attd-window-dot"></span>
+              Window ${settings.window_open_now ? 'Open' : 'Closed'} &nbsp;·&nbsp; ${String(settings.open_hour).padStart(2,'0')}:${String(settings.open_minute).padStart(2,'0')}–${String(settings.close_hour).padStart(2,'0')}:${String(settings.close_minute).padStart(2,'0')} IST
+              ${isAdmin ? '<button class="btn btn-sm btn-outline attd-edit-window-btn" style="margin-left:10px;padding:2px 10px;font-size:.75rem">Edit</button>' : ''}
+            </div>
+          </div>
+          <button class="btn btn-sm btn-primary" id="new-attd-btn" style="width:auto;padding:8px 16px;align-self:flex-start">+ New Session</button>
+        </div>
+
+        <!-- Sessions list -->
+        ${sessions.length === 0
+          ? '<div class="empty-state"><p>No attendance sessions yet.</p></div>'
+          : sessions.map(s => `
+            <div class="attd-admin-session-card">
+              <div class="attd-admin-session-top">
+                <div class="attd-admin-session-meta">
+                  <span class="attd-badge ${s.is_open ? 'live' : 'closed'}">${s.is_open ? 'LIVE' : 'CLOSED'}</span>
+                  <span class="attd-admin-title">${esc(s.title)}</span>
+                  <span class="attd-admin-dept">${esc(s.department)}${s.subject ? ' · ' + esc(s.subject) : ''}</span>
+                  <span class="attd-admin-date muted">${new Date(s.session_date).toLocaleDateString('en-IN',{day:'numeric',month:'short',year:'numeric'})}</span>
+                </div>
+                <div class="attd-admin-session-actions">
+                  <span class="attd-admin-count">${s.record_count} present</span>
+                  ${s.avg_confidence != null ? `<span class="attd-conf-badge">${s.avg_confidence}% avg</span>` : ''}
+                  ${s.is_open ? `<button class="btn btn-sm btn-outline attd-close-btn" data-id="${s.id}">Close Session</button>` : ''}
+                  <button class="btn btn-sm btn-outline attd-expand-btn" data-id="${s.id}">${s.record_count > 0 ? 'View Students ▾' : 'No Records'}</button>
+                </div>
+              </div>
+              <div class="attd-admin-opener">
+                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="8" r="4"/><path d="M4 20c0-4 3.6-7 8-7s8 3 8 7"/></svg>
+                Opened by <strong>${esc(s.opened_by_name)}</strong>${s.opened_by_email ? ' <span class="muted">(' + esc(s.opened_by_email) + ')</span>' : ''} · ${timeAgo(s.opened_at)}
+              </div>
+              <!-- Student records (expandable) -->
+              <div class="attd-student-records" id="asr-${s.id}" style="display:none">
+                ${s.students && s.students.length > 0 ? `
+                <div class="attd-records-table-wrap">
+                  <table class="attd-records-table">
+                    <thead><tr><th>#</th><th>Roll No</th><th>Name</th><th>Dept</th><th>Face</th><th>Confidence</th><th>Time</th><th>IP</th></tr></thead>
+                    <tbody>
+                      ${s.students.map((r, i) => `
+                        <tr>
+                          <td class="muted">${i + 1}</td>
+                          <td class="mono bold">${esc(r.roll_number || '—')}</td>
+                          <td>${esc(r.name || 'Unknown')}</td>
+                          <td>${esc(r.department || '—')}</td>
+                          <td>${r.face_verified
+                            ? '<span class="attd-verified-yes">✓ Verified</span>'
+                            : '<span class="attd-verified-no">✗ Failed</span>'}</td>
+                          <td><span class="attd-conf ${r.confidence >= 80 ? 'high' : r.confidence >= 60 ? 'med' : 'low'}">${r.confidence}%</span></td>
+                          <td class="muted nowrap">${timeAgo(r.marked_at)}</td>
+                          <td class="muted mono small">${esc(r.ip_address || '—')}</td>
+                        </tr>`).join('')}
+                    </tbody>
+                  </table>
+                </div>` : '<p class="muted" style="padding:12px 0">No students have marked attendance yet.</p>'}
+              </div>
+            </div>`).join('')}
+      </div>`;
+
+    // New session button
+    document.getElementById('new-attd-btn').onclick = () => _showNewSessionModal();
+
+    // Edit window button (admin only)
+    el.querySelector('.attd-edit-window-btn')?.addEventListener('click', () => _showWindowSettingsModal(settings));
+
+    // Close session buttons
+    el.querySelectorAll('.attd-close-btn').forEach(btn => {
+      btn.onclick = async () => {
+        btn.disabled = true; btn.textContent = 'Closing...';
+        try { await api('/attendance/sessions/' + btn.dataset.id + '/close', { method: 'POST' }); renderAttendance(); }
+        catch (ex) { btn.disabled = false; btn.textContent = 'Close Session'; alert('Failed: ' + ex.message); }
+      };
+    });
+
+    // Expand/collapse student records
+    el.querySelectorAll('.attd-expand-btn').forEach(btn => {
+      btn.onclick = () => {
+        const panel = document.getElementById('asr-' + btn.dataset.id);
+        if (!panel) return;
+        const open = panel.style.display !== 'none';
+        panel.style.display = open ? 'none' : 'block';
+        btn.textContent = open ? 'View Students ▾' : 'Hide Students ▴';
+      };
+    });
+
+  } catch (ex) { el.innerHTML = `<div class="error-state"><p>Error: ${esc(ex.message)}</p></div>`; }
+}
+
+function _showNewSessionModal() {
+  const overlay = document.createElement('div');
+  overlay.className = 'modal-overlay';
+  overlay.innerHTML = `
+    <div class="modal" style="max-width:420px">
+      <h3>New Attendance Session</h3>
+      <div class="field"><label>Title</label><input id="attd-title" placeholder="e.g. DSA Lab – Section A" autocomplete="off"></div>
+      <div class="field"><label>Department</label>
+        <select id="attd-dept"><option>CSE</option><option>ECE</option><option>ME</option><option>CE</option><option>EE</option><option>IT</option></select>
+      </div>
+      <div class="field"><label>Subject</label>
+        <select id="attd-subject"><option value="AI">AI</option><option value="CSE">CSE</option><option value="IT">IT</option><option value="MATH">Math</option><option value="PHY">Physics</option><option value="">Other</option></select>
+      </div>
+      <div id="attd-error" style="color:var(--danger);font-size:.85rem;min-height:18px"></div>
+      <div class="modal-actions">
+        <button class="btn btn-sm btn-outline" id="attd-cancel">Cancel</button>
+        <button class="btn btn-sm btn-primary" id="attd-submit" style="width:auto;padding:8px 20px">Create</button>
+      </div>
+    </div>`;
+  document.body.appendChild(overlay);
+  overlay.querySelector('#attd-cancel').onclick = () => overlay.remove();
+  overlay.onclick = (e) => { if (e.target === overlay) overlay.remove(); };
+  const titleInput = overlay.querySelector('#attd-title');
+  titleInput.focus();
+  overlay.querySelector('#attd-submit').onclick = async () => {
+    const err = overlay.querySelector('#attd-error');
+    err.textContent = '';
+    const body = {
+      title: titleInput.value.trim(),
+      department: overlay.querySelector('#attd-dept').value,
+      subject: overlay.querySelector('#attd-subject').value || null,
+      session_date: new Date().toISOString().slice(0, 10),
+    };
+    if (!body.title) { err.textContent = 'Title is required'; return; }
+    const btn = overlay.querySelector('#attd-submit');
+    btn.disabled = true; btn.textContent = 'Creating...';
+    try {
+      const r = await api('/attendance/sessions', { method: 'POST', body: JSON.stringify(body) });
+      if (!r.ok) {
+        const d = await r.json();
+        err.textContent = (typeof d.detail === 'string' ? d.detail : d.detail?.message) || 'Failed';
+        btn.disabled = false; btn.textContent = 'Create'; return;
+      }
+      overlay.remove();
+      renderAttendance();
+    } catch (ex) { err.textContent = ex.message; btn.disabled = false; btn.textContent = 'Create'; }
+  };
+}
+
+function _showWindowSettingsModal(current) {
+  const overlay = document.createElement('div');
+  overlay.className = 'modal-overlay';
+  overlay.innerHTML = `
+    <div class="modal" style="max-width:380px">
+      <h3>Attendance Window</h3>
+      <p class="muted" style="font-size:.83rem">Set daily open/close times in IST. Changes apply immediately.</p>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin:16px 0">
+        <div class="field">
+          <label>Open (IST)</label>
+          <input type="time" id="wnd-open" value="${String(current.open_hour).padStart(2,'0')}:${String(current.open_minute).padStart(2,'0')}">
+        </div>
+        <div class="field">
+          <label>Close (IST)</label>
+          <input type="time" id="wnd-close" value="${String(current.close_hour).padStart(2,'0')}:${String(current.close_minute).padStart(2,'0')}">
+        </div>
+      </div>
+      <p class="muted" style="font-size:.75rem;background:var(--bg);padding:8px 12px;border-radius:8px">
+        Default: 00:01–12:01 IST (midnight to noon). Students can only mark attendance during this window.
+      </p>
+      <div id="wnd-error" style="color:var(--danger);font-size:.83rem;min-height:16px;margin-top:8px"></div>
+      <div class="modal-actions">
+        <button class="btn btn-sm btn-outline" onclick="this.closest('.modal-overlay').remove()">Cancel</button>
+        <button class="btn btn-sm btn-primary" id="wnd-save" style="width:auto;padding:8px 20px">Save</button>
+      </div>
+    </div>`;
+  document.body.appendChild(overlay);
+  overlay.onclick = (e) => { if (e.target === overlay) overlay.remove(); };
+  overlay.querySelector('#wnd-save').onclick = async () => {
+    const errEl = overlay.querySelector('#wnd-error');
+    errEl.textContent = '';
+    const openVal = overlay.querySelector('#wnd-open').value;
+    const closeVal = overlay.querySelector('#wnd-close').value;
+    if (!openVal || !closeVal) { errEl.textContent = 'Both times required'; return; }
+    const [oh, om] = openVal.split(':').map(Number);
+    const [ch, cm] = closeVal.split(':').map(Number);
+    if (oh * 60 + om >= ch * 60 + cm) { errEl.textContent = 'Close time must be after open time'; return; }
+    const btn = overlay.querySelector('#wnd-save');
+    btn.disabled = true; btn.textContent = 'Saving...';
+    try {
+      await api('/attendance/settings', {
+        method: 'PUT',
+        body: JSON.stringify({ open_hour: oh, open_minute: om, close_hour: ch, close_minute: cm }),
+      });
+      overlay.remove();
+      showToast('Attendance window updated!', 'success');
+      renderAttendance();
+    } catch (ex) { errEl.textContent = ex.message; btn.disabled = false; btn.textContent = 'Save'; }
+  };
+}
+
 /* ═══════════════════════════════════════════════════════════
-   COPY CHECK — Plagiarism checker using vision model
+/* ═══════════════════════════════════════════════════════════
+   COPY CHECK — Session-based AI vision marking + plagiarism
+   Faculty & Admin only. Students are redirected.
    ═══════════════════════════════════════════════════════════ */
+
+let ccView = 'list';       // 'list' | 'detail'
+let ccSessionId = null;    // active session ID
+let ccEvalTimer = null;    // polling interval for evaluation progress
+
 async function renderCopyCheck() {
   const el = document.getElementById('page-content');
   el.className = 'page';
-  el.innerHTML = `
-    <div class="copycheck-page">
-      <div class="copycheck-header">
-        <h2>Copy Check</h2>
-        <p class="muted">Upload answer sheets or documents to check for similarities using AI vision analysis.</p>
-      </div>
-      <div class="copycheck-upload-area" id="cc-drop-zone">
-        <div class="cc-drop-content">
-          <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
-          <p>Drag & drop images here or <label class="cc-browse" for="cc-file-input">browse</label></p>
-          <p class="muted" style="font-size:.75rem">Supports JPG, PNG, PDF — up to 10 files at once</p>
-          <input type="file" id="cc-file-input" multiple accept="image/*,.pdf" style="display:none">
-        </div>
-      </div>
-      <div class="cc-files" id="cc-file-list"></div>
-      <div class="cc-actions" id="cc-actions" style="display:none">
-        <button class="btn btn-primary" id="cc-analyze-btn">
-          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
-          Analyze for Copies
-        </button>
-        <button class="btn btn-outline btn-sm" id="cc-clear-btn">Clear All</button>
-      </div>
-      <div id="cc-results"></div>
+  const u = state.user || {};
+  if (u.role === 'student') {
+    el.innerHTML = `<div class="empty-state" style="padding:60px 20px;text-align:center">
+      <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="var(--muted-text)" stroke-width="1.5"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+      <p style="margin-top:12px;color:var(--muted-text)">Copy Check is for faculty and administrators only.</p>
     </div>`;
-  bindCopyCheck();
+    return;
+  }
+  if (ccView === 'detail' && ccSessionId) {
+    await renderCopyCheckDetail(el);
+  } else {
+    await renderCopyCheckList(el);
+  }
 }
 
-function bindCopyCheck() {
-  const dropZone = document.getElementById('cc-drop-zone');
-  const fileInput = document.getElementById('cc-file-input');
-  const fileList = document.getElementById('cc-file-list');
-  const actions = document.getElementById('cc-actions');
-  const results = document.getElementById('cc-results');
-  let files = [];
+async function renderCopyCheckList(el) {
+  el.innerHTML = `<div class="admin-header">
+    <div><h2>Copy Check</h2><p class="muted" style="margin:0">AI vision answer-sheet marking + plagiarism detection</p></div>
+    <button class="btn btn-primary" id="cc-new-session-btn" style="width:auto;padding:8px 18px">+ New Session</button>
+  </div>
+  <div id="cc-sessions-list"><div class="loading-state"><div class="spinner"></div><span>Loading sessions…</span></div></div>`;
 
-  function renderFileList() {
-    if (files.length === 0) { fileList.innerHTML = ''; actions.style.display = 'none'; return; }
-    actions.style.display = 'flex';
-    fileList.innerHTML = files.map((f, i) => `
-      <div class="cc-file-item">
-        <div class="cc-file-thumb">${f.type.startsWith('image/') ? `<img src="${URL.createObjectURL(f)}" alt="">` : '<svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>'}</div>
-        <div class="cc-file-info">
-          <span class="cc-file-name">${esc(f.name)}</span>
-          <span class="cc-file-size">${(f.size / 1024).toFixed(1)} KB</span>
-        </div>
-        <button class="icon-btn cc-file-remove" data-idx="${i}" title="Remove">&times;</button>
-      </div>
-    `).join('');
-    fileList.querySelectorAll('.cc-file-remove').forEach(btn => {
-      btn.onclick = () => { files.splice(+btn.dataset.idx, 1); renderFileList(); };
-    });
-  }
+  document.getElementById('cc-new-session-btn').onclick = showNewCCSessionModal;
+  await loadCCSessions();
+}
 
-  function addFiles(newFiles) {
-    for (const f of newFiles) {
-      if (files.length >= 10) break;
-      files.push(f);
+async function loadCCSessions() {
+  const listEl = document.getElementById('cc-sessions-list');
+  if (!listEl) return;
+  try {
+    const data = await apiJson('/copy-check/sessions?per_page=50');
+    const sessions = data.sessions || [];
+    if (sessions.length === 0) {
+      listEl.innerHTML = `<div class="empty-state" style="padding:40px;text-align:center">
+        <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="var(--muted-text)" stroke-width="1.5"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
+        <p style="color:var(--muted-text);margin-top:12px">No sessions yet. Create one to start marking.</p>
+      </div>`;
+      return;
     }
-    renderFileList();
+    listEl.innerHTML = sessions.map(s => {
+      const statusColor = {active:'var(--accent)',evaluating:'var(--warning,#e6a817)',done:'#22c55e',archived:'var(--muted-text)'}[s.status] || '#888';
+      const progress = s.sheet_count > 0 ? Math.round((s.evaluated_count / s.sheet_count) * 100) : 0;
+      return `<div class="cc-session-card" data-id="${s.id}">
+        <div class="cc-session-info">
+          <div class="cc-session-subject">${esc(s.subject)}</div>
+          <div class="cc-session-meta">
+            <span>${esc(s.class_name || '')}</span>
+            <span class="dot">·</span>
+            <span>${esc(s.department)}</span>
+            <span class="dot">·</span>
+            <span>Total: ${s.total_marks} marks</span>
+            <span class="dot">·</span>
+            <span>${timeAgo(s.created_at)}</span>
+          </div>
+          ${s.sheet_count > 0 ? `<div class="cc-progress-bar" title="${s.evaluated_count}/${s.sheet_count} evaluated">
+            <div class="cc-progress-fill" style="width:${progress}%;background:${statusColor}"></div>
+            <span class="cc-progress-label">${s.evaluated_count}/${s.sheet_count} evaluated</span>
+          </div>` : ''}
+        </div>
+        <div class="cc-session-right">
+          <span class="badge" style="background:${statusColor}20;color:${statusColor};border:1px solid ${statusColor}40">${s.status}</span>
+          ${s.plagiarism_run ? '<span class="badge" style="background:#7c3aed20;color:#7c3aed;border:1px solid #7c3aed40;margin-left:4px">plagiarism checked</span>' : ''}
+        </div>
+      </div>`;
+    }).join('');
+    listEl.querySelectorAll('.cc-session-card').forEach(card => {
+      card.onclick = () => { ccSessionId = card.dataset.id; ccView = 'detail'; renderCopyCheck(); };
+    });
+  } catch(ex) {
+    listEl.innerHTML = `<div class="error-state"><p>Error: ${esc(ex.message)}</p></div>`;
   }
+}
 
-  dropZone.ondragover = (e) => { e.preventDefault(); dropZone.classList.add('dragover'); };
-  dropZone.ondragleave = () => dropZone.classList.remove('dragover');
-  dropZone.ondrop = (e) => { e.preventDefault(); dropZone.classList.remove('dragover'); addFiles(e.dataTransfer.files); };
-  fileInput.onchange = () => { addFiles(fileInput.files); fileInput.value = ''; };
-
-  document.getElementById('cc-clear-btn').onclick = () => { files = []; renderFileList(); results.innerHTML = ''; };
-  document.getElementById('cc-analyze-btn').onclick = async () => {
-    if (files.length < 2) { alert('Upload at least 2 documents to compare.'); return; }
-    results.innerHTML = `<div class="mac-thinking"><div class="mac-think-orb"><div class="mac-think-ring"></div><div class="mac-think-ring r2"></div><div class="mac-think-ring r3"></div><div class="mac-think-letters"><span class="mac-tl">M</span><span class="mac-tl">A</span><span class="mac-tl">C</span></div></div><div class="mac-think-label">Analyzing documents for similarities...</div></div>`;
-    // Animate thinking letters
-    const tls = results.querySelectorAll('.mac-tl');
-    let litIdx = 0;
-    const litIv = setInterval(() => { tls.forEach((t,i) => t.classList.toggle('lit', i === litIdx)); litIdx = (litIdx + 1) % tls.length; }, 400);
-    try {
-      // Convert files to base64, send to LLM for vision analysis
-      const images = [];
-      for (const f of files) {
-        if (f.type.startsWith('image/')) {
-          const b64 = await fileToBase64(f);
-          images.push({ name: f.name, data: b64, type: f.type });
-        }
-      }
-      if (images.length < 2) {
-        clearInterval(litIv);
-        results.innerHTML = '<div class="cc-result-card error"><p>Need at least 2 image files for comparison.</p></div>';
-        return;
-      }
-      const content = [
-        { type: 'text', text: 'You are a plagiarism detection expert. Compare these answer sheets / documents carefully. For each pair of documents, identify: 1) Percentage of similarity 2) Specific copied sections 3) Whether copying is confirmed, suspected, or unlikely. Give a detailed structured report. Focus on handwriting similarity, identical answers, same mistakes, and identical phrasing.' },
-      ];
-      images.forEach(img => {
-        content.push({ type: 'text', text: `Document: ${img.name}` });
-        content.push({ type: 'image_url', image_url: { url: `data:${img.type};base64,${img.data}` } });
-      });
-      const res = await api('/query/chat', {
-        method: 'POST',
-        body: JSON.stringify({
-          model: 'auto',
-          messages: [{ role: 'user', content }],
-          temperature: 0.2,
-          max_tokens: 2000,
-        }),
-      });
-      clearInterval(litIv);
+function showNewCCSessionModal() {
+  showModal({
+    title: 'New Copy Check Session',
+    body: `
+      <div class="form-group"><label>Subject / Exam Name</label>
+        <input id="cc-sub" class="form-input" placeholder="e.g. DSA Mid-Term Nov 2025" required></div>
+      <div class="form-group"><label>Class / Batch</label>
+        <input id="cc-class" class="form-input" placeholder="e.g. 3A, 2023 Batch"></div>
+      <div class="form-row">
+        <div class="form-group" style="flex:1"><label>Department</label>
+          <select id="cc-dept" class="form-input">
+            <option>CSE</option><option>ECE</option><option>ME</option><option>CE</option>
+            <option>EEE</option><option>IT</option><option>ALL</option>
+          </select></div>
+        <div class="form-group" style="flex:1"><label>Total Marks</label>
+          <input id="cc-marks" class="form-input" type="number" value="100" min="1" max="1000"></div>
+      </div>
+      <div class="form-group"><label>Syllabus / Exam Paper Context <span class="muted">(optional — helps AI grade accurately)</span></label>
+        <textarea id="cc-syllabus" class="form-input" rows="4" placeholder="Paste questions, topics, or model answers here…" style="resize:vertical"></textarea></div>
+      <div id="cc-modal-err" class="error-banner" style="display:none"></div>`,
+    confirmText: 'Create Session',
+    onConfirm: async () => {
+      const subject = document.getElementById('cc-sub').value.trim();
+      if (!subject) { document.getElementById('cc-modal-err').textContent = 'Subject is required.'; document.getElementById('cc-modal-err').style.display='block'; return false; }
+      const fd = new FormData();
+      fd.append('subject', subject);
+      fd.append('class_name', document.getElementById('cc-class').value.trim());
+      fd.append('department', document.getElementById('cc-dept').value);
+      fd.append('total_marks', document.getElementById('cc-marks').value);
+      fd.append('syllabus_text', document.getElementById('cc-syllabus').value.trim());
+      const res = await api('/copy-check/sessions', { method: 'POST', body: fd });
       if (!res.ok) {
         const d = await res.json();
-        results.innerHTML = `<div class="cc-result-card error"><p>Analysis failed: ${esc(d.detail?.message || d.detail || 'Unknown error')}</p></div>`;
-        return;
+        document.getElementById('cc-modal-err').textContent = d.detail || 'Failed to create session.';
+        document.getElementById('cc-modal-err').style.display = 'block';
+        return false;
       }
-      const data = await res.json();
-      const reply = data.choices?.[0]?.message?.content || data.response || 'No response';
-      results.innerHTML = `<div class="cc-result-card"><h3>Analysis Report</h3><div class="cc-report">${formatMd(reply)}</div></div>`;
-    } catch (ex) {
-      clearInterval(litIv);
-      results.innerHTML = `<div class="cc-result-card error"><p>Error: ${esc(ex.message)}</p></div>`;
-    }
+      const sess = await res.json();
+      ccSessionId = sess.id;
+      ccView = 'detail';
+      closeModal();
+      renderCopyCheck();
+    },
+  });
+}
+
+async function renderCopyCheckDetail(el) {
+  el.innerHTML = `<div class="cc-detail-nav">
+    <button class="btn btn-sm btn-outline" id="cc-back-btn">← All Sessions</button>
+    <div id="cc-detail-title" style="font-weight:600;font-size:1.1rem;padding-left:8px">Loading…</div>
+  </div>
+  <div id="cc-detail-body"><div class="loading-state"><div class="spinner"></div><span>Loading session…</span></div></div>`;
+
+  document.getElementById('cc-back-btn').onclick = () => {
+    ccView = 'list'; ccSessionId = null;
+    if (ccEvalTimer) { clearInterval(ccEvalTimer); ccEvalTimer = null; }
+    renderCopyCheck();
   };
+  await loadCCDetail();
+}
+
+async function loadCCDetail() {
+  const bodyEl = document.getElementById('cc-detail-body');
+  if (!bodyEl) return;
+  try {
+    const [sess, studentsData] = await Promise.all([
+      apiJson(`/copy-check/sessions/${ccSessionId}`),
+      apiJson(`/copy-check/sessions/${ccSessionId}/students`),
+    ]);
+    const titleEl = document.getElementById('cc-detail-title');
+    if (titleEl) titleEl.textContent = `${sess.subject} — ${sess.class_name || ''} ${sess.department}`;
+
+    const sheets = sess.sheets || [];
+    const sheetMap = {};
+    sheets.forEach(s => { sheetMap[s.student_roll] = s; });
+    const students = studentsData.students || [];
+    const plagiarism = sess.plagiarism || [];
+
+    const progress = sheets.length > 0 ? Math.round((sess.evaluated_count / sess.sheet_count) * 100) : 0;
+    const canEvaluate = sheets.some(s => s.status === 'uploaded' || s.status === 'error');
+    const canPlagiarism = sheets.filter(s => s.status === 'done').length >= 2;
+
+    bodyEl.innerHTML = `
+      <!-- Session Stats Bar -->
+      <div class="cc-stats-bar">
+        <div class="cc-stat"><span class="cc-stat-num">${sess.total_marks}</span><span class="cc-stat-label">Total Marks</span></div>
+        <div class="cc-stat"><span class="cc-stat-num">${sess.sheet_count}</span><span class="cc-stat-label">Uploaded</span></div>
+        <div class="cc-stat"><span class="cc-stat-num">${sess.evaluated_count}</span><span class="cc-stat-label">Evaluated</span></div>
+        <div class="cc-stat"><span class="cc-stat-num" style="color:${sess.status==='done'?'#22c55e':'var(--accent)'}">${sess.status}</span><span class="cc-stat-label">Status</span></div>
+      </div>
+
+      <!-- Action Buttons -->
+      <div class="cc-action-bar">
+        ${canEvaluate ? `<button class="btn btn-primary" id="cc-eval-btn">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="5 3 19 12 5 21 5 3"/></svg>
+          Evaluate All Sheets
+        </button>` : ''}
+        ${canPlagiarism ? `<button class="btn btn-outline" id="cc-plg-btn">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+          Check Plagiarism
+        </button>` : ''}
+        ${sess.evaluated_count > 0 ? `<a class="btn btn-outline" href="${window.location.origin}/api/v1/copy-check/sessions/${ccSessionId}/report/pdf" target="_blank">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/></svg>
+          Download Report PDF
+        </a>` : ''}
+      </div>
+
+      ${sess.status === 'evaluating' ? `<div class="cc-eval-progress" id="cc-eval-progress-bar">
+        <div class="cc-eval-bar-fill" style="width:${progress}%"></div>
+        <span class="cc-eval-bar-label">Evaluating… ${sess.evaluated_count}/${sess.sheet_count}</span>
+      </div>` : ''}
+
+      <!-- Students Table -->
+      <div class="cc-section">
+        <h3 class="cc-section-title">Students</h3>
+        <div class="cc-students-grid">
+          ${students.length === 0 ? `<p class="muted" style="padding:20px">No registered students found for ${esc(sess.department)}. Upload sheets manually below.</p>` : ''}
+          ${students.map(st => {
+            const sheet = sheetMap[st.roll_number];
+            const statusLabel = sheet ? sheet.status : 'not uploaded';
+            const statusColor = {done:'#22c55e',evaluating:'var(--warning,#e6a817)',uploaded:'var(--accent)',error:'#ef4444','not uploaded':'#aaa'}[statusLabel] || '#aaa';
+            return `<div class="cc-student-row">
+              <div class="cc-student-info">
+                <span class="cc-student-name">${esc(st.name)}</span>
+                <span class="cc-student-roll muted">${esc(st.roll_number)}</span>
+              </div>
+              ${sheet && sheet.ai_marks !== null ? `<span class="cc-marks-badge">${sheet.ai_marks}/${sess.total_marks}</span>` : ''}
+              <span class="cc-status-dot" style="background:${statusColor}" title="${statusLabel}"></span>
+              <label class="btn btn-sm btn-outline cc-upload-label" title="Upload sheet for ${esc(st.name)}">
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+                ${sheet ? 'Re-upload' : 'Upload'}
+                <input type="file" class="cc-sheet-input" data-roll="${esc(st.roll_number)}" accept="image/*,.pdf" style="display:none">
+              </label>
+            </div>`;
+          }).join('')}
+        </div>
+        <!-- Unregistered sheet upload -->
+        <details class="cc-manual-upload">
+          <summary class="btn btn-sm btn-ghost" style="cursor:pointer;margin-top:12px">+ Upload for unlisted student</summary>
+          <div class="cc-manual-form" style="display:flex;gap:8px;margin-top:8px;flex-wrap:wrap">
+            <input id="cc-manual-roll" class="form-input" placeholder="Roll number" style="width:150px">
+            <input id="cc-manual-file-btn" type="file" accept="image/*,.pdf" style="display:none" id="cc-manual-file-input">
+            <label class="btn btn-sm btn-outline" for="cc-manual-file-input">Choose file</label>
+            <span id="cc-manual-file-name" class="muted" style="align-self:center;font-size:.8rem">No file chosen</span>
+            <button class="btn btn-sm btn-primary" id="cc-manual-upload-btn">Upload</button>
+          </div>
+        </details>
+      </div>
+
+      <!-- Marks Results Table -->
+      ${sheets.filter(s => s.ai_marks !== null).length > 0 ? `
+      <div class="cc-section">
+        <h3 class="cc-section-title">Marks</h3>
+        <div class="table-responsive">
+          <table class="data-table">
+            <thead><tr><th>Roll No.</th><th>Name</th><th>Marks</th><th>Out of</th><th>%</th><th>Feedback</th></tr></thead>
+            <tbody>
+              ${sheets.filter(s => s.ai_marks !== null).sort((a,b) => (b.ai_marks||0) - (a.ai_marks||0)).map(s => `
+                <tr>
+                  <td class="mono">${esc(s.student_roll)}</td>
+                  <td>${esc(s.student_name)}</td>
+                  <td><strong>${s.ai_marks}</strong></td>
+                  <td class="muted">${sess.total_marks}</td>
+                  <td>${Math.round((s.ai_marks / sess.total_marks) * 100)}%</td>
+                  <td style="max-width:300px;font-size:.8rem;color:var(--muted-text)">${esc((s.ai_feedback || '').slice(0, 120))}${s.ai_feedback && s.ai_feedback.length > 120 ? '…' : ''}</td>
+                </tr>`).join('')}
+            </tbody>
+          </table>
+        </div>
+      </div>` : ''}
+
+      <!-- Plagiarism Results -->
+      ${plagiarism.length > 0 ? `
+      <div class="cc-section">
+        <h3 class="cc-section-title">Plagiarism Report
+          <span class="badge" style="background:#ef444420;color:#ef4444;margin-left:8px">${plagiarism.filter(p=>p.verdict==='confirmed').length} confirmed</span>
+          <span class="badge" style="background:#f9731620;color:#f97316;margin-left:4px">${plagiarism.filter(p=>p.verdict==='suspected').length} suspected</span>
+        </h3>
+        <div class="table-responsive">
+          <table class="data-table">
+            <thead><tr><th>Student A</th><th>Student B</th><th>Similarity</th><th>Verdict</th></tr></thead>
+            <tbody>
+              ${plagiarism.filter(p => p.verdict !== 'unlikely').sort((a,b) => b.similarity_score - a.similarity_score).map(p => {
+                const vc = {confirmed:'#ef4444',suspected:'#f97316',unlikely:'#22c55e'}[p.verdict]||'#888';
+                return `<tr>
+                  <td class="mono">${esc(p.roll_a)}</td>
+                  <td class="mono">${esc(p.roll_b)}</td>
+                  <td><strong>${p.similarity_pct}%</strong></td>
+                  <td><span class="badge" style="background:${vc}20;color:${vc};border:1px solid ${vc}40">${p.verdict}</span></td>
+                </tr>`;
+              }).join('')}
+            </tbody>
+          </table>
+        </div>
+      </div>` : ''}
+    `;
+
+    // Bind evaluate button
+    const evalBtn = document.getElementById('cc-eval-btn');
+    if (evalBtn) {
+      evalBtn.onclick = async () => {
+        evalBtn.disabled = true;
+        evalBtn.textContent = 'Starting…';
+        try {
+          const r = await api(`/copy-check/sessions/${ccSessionId}/evaluate`, { method: 'POST' });
+          if (!r.ok) { const d = await r.json(); showToast(d.detail || 'Failed', 'error'); evalBtn.disabled = false; return; }
+          showToast('Evaluation started!', 'success');
+          // Poll every 4 seconds until done
+          if (ccEvalTimer) clearInterval(ccEvalTimer);
+          ccEvalTimer = setInterval(async () => {
+            const fresh = await apiJson(`/copy-check/sessions/${ccSessionId}`).catch(() => null);
+            if (!fresh) return;
+            const pb = document.getElementById('cc-eval-progress-bar');
+            if (pb) {
+              const pct = fresh.sheet_count > 0 ? Math.round((fresh.evaluated_count / fresh.sheet_count) * 100) : 0;
+              const fill = pb.querySelector('.cc-eval-bar-fill');
+              const label = pb.querySelector('.cc-eval-bar-label');
+              if (fill) fill.style.width = pct + '%';
+              if (label) label.textContent = `Evaluating… ${fresh.evaluated_count}/${fresh.sheet_count}`;
+            }
+            if (fresh.status === 'done' || (fresh.evaluated_count >= fresh.sheet_count && fresh.sheet_count > 0)) {
+              clearInterval(ccEvalTimer); ccEvalTimer = null;
+              showToast('Evaluation complete!', 'success');
+              await loadCCDetail();
+            }
+          }, 4000);
+        } catch(ex) { showToast(ex.message, 'error'); evalBtn.disabled = false; }
+      };
+    }
+
+    // Bind plagiarism button
+    const plgBtn = document.getElementById('cc-plg-btn');
+    if (plgBtn) {
+      plgBtn.onclick = async () => {
+        plgBtn.disabled = true;
+        plgBtn.textContent = 'Checking…';
+        try {
+          const r = await api(`/copy-check/sessions/${ccSessionId}/plagiarism`, { method: 'POST' });
+          if (!r.ok) { const d = await r.json(); showToast(d.detail || 'Failed', 'error'); plgBtn.disabled = false; return; }
+          const d = await r.json();
+          showToast(`Plagiarism check done. ${d.confirmed} confirmed, ${d.suspected} suspected.`, 'success');
+          await loadCCDetail();
+        } catch(ex) { showToast(ex.message, 'error'); plgBtn.disabled = false; }
+      };
+    }
+
+    // Bind individual sheet upload inputs
+    bodyEl.querySelectorAll('.cc-sheet-input').forEach(input => {
+      input.onchange = async () => {
+        const file = input.files[0];
+        if (!file) return;
+        const roll = input.dataset.roll;
+        const label = input.closest('label');
+        label.textContent = 'Uploading…';
+        label.style.opacity = '0.6';
+        const fd = new FormData();
+        fd.append('student_roll', roll);
+        fd.append('file', file);
+        try {
+          const r = await api(`/copy-check/sessions/${ccSessionId}/sheets`, { method: 'POST', body: fd });
+          if (!r.ok) { const d = await r.json(); showToast(d.detail || 'Upload failed', 'error'); label.textContent = 'Upload'; label.style.opacity = '1'; return; }
+          showToast(`Sheet uploaded for ${roll}`, 'success');
+          await loadCCDetail();
+        } catch(ex) { showToast(ex.message, 'error'); label.textContent = 'Upload'; label.style.opacity = '1'; }
+        input.value = '';
+      };
+    });
+
+    // Bind manual upload
+    const manualFileInput = document.getElementById('cc-manual-file-input');
+    const manualFileName = document.getElementById('cc-manual-file-name');
+    if (manualFileInput) {
+      manualFileInput.onchange = () => {
+        manualFileName.textContent = manualFileInput.files[0]?.name || 'No file chosen';
+      };
+    }
+    const manualBtn = document.getElementById('cc-manual-upload-btn');
+    if (manualBtn) {
+      manualBtn.onclick = async () => {
+        const roll = document.getElementById('cc-manual-roll').value.trim();
+        const file = manualFileInput?.files[0];
+        if (!roll) { showToast('Enter roll number', 'error'); return; }
+        if (!file) { showToast('Choose a file', 'error'); return; }
+        manualBtn.disabled = true;
+        const fd = new FormData();
+        fd.append('student_roll', roll);
+        fd.append('file', file);
+        try {
+          const r = await api(`/copy-check/sessions/${ccSessionId}/sheets`, { method: 'POST', body: fd });
+          if (!r.ok) { const d = await r.json(); showToast(d.detail || 'Upload failed', 'error'); manualBtn.disabled = false; return; }
+          showToast('Sheet uploaded!', 'success');
+          await loadCCDetail();
+        } catch(ex) { showToast(ex.message, 'error'); manualBtn.disabled = false; }
+        if (manualFileInput) manualFileInput.value = '';
+        if (manualFileName) manualFileName.textContent = 'No file chosen';
+        document.getElementById('cc-manual-roll').value = '';
+        manualBtn.disabled = false;
+      };
+    }
+
+    // Auto-start polling if session is currently evaluating
+    if (sess.status === 'evaluating' && !ccEvalTimer) {
+      ccEvalTimer = setInterval(async () => {
+        const fresh = await apiJson(`/copy-check/sessions/${ccSessionId}`).catch(() => null);
+        if (!fresh) return;
+        const pb = document.getElementById('cc-eval-progress-bar');
+        if (pb) {
+          const pct = fresh.sheet_count > 0 ? Math.round((fresh.evaluated_count / fresh.sheet_count) * 100) : 0;
+          const fill = pb.querySelector('.cc-eval-bar-fill');
+          const label = pb.querySelector('.cc-eval-bar-label');
+          if (fill) fill.style.width = pct + '%';
+          if (label) label.textContent = `Evaluating… ${fresh.evaluated_count}/${fresh.sheet_count}`;
+        }
+        if (fresh.status === 'done' || (fresh.evaluated_count >= fresh.sheet_count && fresh.sheet_count > 0)) {
+          clearInterval(ccEvalTimer); ccEvalTimer = null;
+          await loadCCDetail();
+        }
+      }, 4000);
+    }
+  } catch(ex) {
+    bodyEl.innerHTML = `<div class="error-state"><p>Error: ${esc(ex.message)}</p></div>`;
+  }
 }
 
 function fileToBase64(file) {
@@ -2542,6 +3682,610 @@ function fileToBase64(file) {
     reader.readAsDataURL(file);
   });
 }
+
+/* ═══════════════════════════════════════════════════════════
+   NOTEBOOKS — Full IDE (Colab-style)
+   ═══════════════════════════════════════════════════════════ */
+
+// Notebook state
+let _nbState = {
+  notebooks: [],
+  current: null,
+  cells: [],
+  ws: null,
+  executingCells: new Set(),
+  outputs: {},
+  kernelId: null,
+  sidebarOpen: true,
+};
+
+function _nbLoadFromStorage() {
+  _nbState.notebooks = userGet('notebooks', []);
+}
+
+function _nbSave() {
+  // Save notebook list
+  if (_nbState.current) {
+    const nb = _nbState.notebooks.find(n => n.id === _nbState.current);
+    if (nb) {
+      nb.cells = _nbState.cells;
+      nb.outputs = _nbState.outputs;
+      nb.updated_at = new Date().toISOString();
+    }
+  }
+  userSet('notebooks', _nbState.notebooks);
+}
+
+function _nbNewId() { return crypto.randomUUID ? crypto.randomUUID() : 'nb-' + Date.now() + '-' + Math.random().toString(36).slice(2, 8); }
+function _cellNewId() { return 'cell-' + Date.now() + '-' + Math.random().toString(36).slice(2, 8); }
+
+function _nbCreate(title) {
+  const nb = {
+    id: _nbNewId(),
+    title: title || 'Untitled Notebook',
+    language: 'python',
+    cells: [{ id: _cellNewId(), type: 'code', source: '', language: 'python' }],
+    outputs: {},
+    created_at: new Date().toISOString(),
+    updated_at: new Date().toISOString(),
+  };
+  _nbState.notebooks.unshift(nb);
+  _nbState.current = nb.id;
+  _nbState.cells = nb.cells;
+  _nbState.outputs = nb.outputs || {};
+  _nbSave();
+  return nb;
+}
+
+function _nbLoad(nbId) {
+  const nb = _nbState.notebooks.find(n => n.id === nbId);
+  if (!nb) return false;
+  _nbState.current = nb.id;
+  _nbState.cells = nb.cells || [];
+  _nbState.outputs = nb.outputs || {};
+  return true;
+}
+
+function _nbDelete(nbId) {
+  _nbState.notebooks = _nbState.notebooks.filter(n => n.id !== nbId);
+  if (_nbState.current === nbId) {
+    _nbState.current = null;
+    _nbState.cells = [];
+    _nbState.outputs = {};
+  }
+  _nbSave();
+}
+
+function _nbConnectWs() {
+  if (_nbState.ws && _nbState.ws.readyState <= 1) return;
+  if (!_nbState.current) return;
+  const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+  const url = `${proto}//${location.host}/ws/notebook/${_nbState.current}`;
+  const ws = new WebSocket(url);
+  ws.onopen = () => { _nbState.ws = ws; };
+  ws.onmessage = (e) => {
+    try {
+      const msg = JSON.parse(e.data);
+      _nbHandleWsMsg(msg);
+    } catch {}
+  };
+  ws.onclose = () => {
+    _nbState.ws = null;
+    // Auto-reconnect if still on notebooks page
+    if (state.page === 'notebooks' && _nbState.current) {
+      setTimeout(_nbConnectWs, 3000);
+    }
+  };
+  ws.onerror = () => {};
+  _nbState.ws = ws;
+}
+
+function _nbHandleWsMsg(msg) {
+  const cellId = msg.cell_id;
+  if (!cellId) return;
+
+  if (msg.type === 'status') {
+    if (msg.execution_state === 'busy') {
+      _nbState.executingCells.add(cellId);
+    } else if (msg.execution_state === 'idle') {
+      _nbState.executingCells.delete(cellId);
+    }
+    _nbRenderCellStatus(cellId);
+    return;
+  }
+
+  // Initialize output array
+  if (!_nbState.outputs[cellId]) _nbState.outputs[cellId] = [];
+
+  if (msg.type === 'stream') {
+    _nbState.outputs[cellId].push({ type: 'stream', name: msg.name, text: msg.text });
+  } else if (msg.type === 'error') {
+    _nbState.outputs[cellId].push({ type: 'error', ename: msg.ename, evalue: msg.evalue, traceback: msg.traceback || [] });
+    _nbState.executingCells.delete(cellId);
+    _nbRenderCellStatus(cellId);
+  } else if (msg.type === 'execute_result' || msg.type === 'display_data') {
+    _nbState.outputs[cellId].push({ type: msg.type, data: msg.data });
+  }
+
+  _nbRenderCellOutput(cellId);
+  _nbSave();
+}
+
+function _nbExecCell(cellId) {
+  const cell = _nbState.cells.find(c => c.id === cellId);
+  if (!cell || cell.type !== 'code') return;
+  _nbState.outputs[cellId] = []; // Clear previous output
+  _nbRenderCellOutput(cellId);
+
+  if (_nbState.ws && _nbState.ws.readyState === 1) {
+    _nbState.ws.send(JSON.stringify({
+      type: 'execute',
+      cell_id: cellId,
+      code: cell.source,
+      language: cell.language || 'python',
+      kernel_id: _nbState.kernelId,
+    }));
+  } else {
+    // Fallback: REST API execution
+    _nbExecCellRest(cellId, cell);
+  }
+}
+
+async function _nbExecCellRest(cellId, cell) {
+  _nbState.executingCells.add(cellId);
+  _nbState.outputs[cellId] = [];
+  _nbRenderCellStatus(cellId);
+  _nbRenderCellOutput(cellId);
+
+  try {
+    // First save cell to backend, then execute
+    const res = await api('/notebooks/cells/' + cellId + '/run', { method: 'POST' });
+    if (res.ok) {
+      const data = await res.json();
+      const exec = data.execution;
+      if (exec.stdout) _nbState.outputs[cellId].push({ type: 'stream', name: 'stdout', text: exec.stdout });
+      if (exec.stderr) _nbState.outputs[cellId].push({ type: 'stream', name: 'stderr', text: exec.stderr });
+      if (exec.status === 'failed' || exec.status === 'timeout') {
+        _nbState.outputs[cellId].push({ type: 'error', ename: exec.status, evalue: exec.stderr || 'Execution failed', traceback: [] });
+      }
+    } else {
+      // WebSocket-only execution
+      _nbState.outputs[cellId].push({ type: 'stream', name: 'stderr', text: 'Connecting to execution engine...\n' });
+      _nbConnectWs();
+      await new Promise(r => setTimeout(r, 1000));
+      if (_nbState.ws && _nbState.ws.readyState === 1) {
+        _nbState.ws.send(JSON.stringify({
+          type: 'execute', cell_id: cellId,
+          code: cell.source, language: cell.language || 'python',
+        }));
+        return; // WS handler will manage from here
+      }
+      _nbState.outputs[cellId].push({ type: 'error', ename: 'ConnectionError', evalue: 'Could not connect to execution engine', traceback: [] });
+    }
+  } catch (e) {
+    _nbState.outputs[cellId].push({ type: 'error', ename: 'Error', evalue: e.message, traceback: [] });
+  }
+
+  _nbState.executingCells.delete(cellId);
+  _nbRenderCellStatus(cellId);
+  _nbRenderCellOutput(cellId);
+  _nbSave();
+}
+
+const NB_LANGUAGES = [
+  { id: 'python', name: 'Python', color: '#3776AB' },
+  { id: 'javascript', name: 'JavaScript', color: '#F7DF1E' },
+  { id: 'typescript', name: 'TypeScript', color: '#3178C6' },
+  { id: 'c', name: 'C', color: '#A8B9CC' },
+  { id: 'cpp', name: 'C++', color: '#00599C' },
+  { id: 'java', name: 'Java', color: '#ED8B00' },
+  { id: 'go', name: 'Go', color: '#00ADD8' },
+  { id: 'rust', name: 'Rust', color: '#DEA584' },
+  { id: 'r', name: 'R', color: '#276DC3' },
+  { id: 'julia', name: 'Julia', color: '#9558B2' },
+  { id: 'bash', name: 'Bash', color: '#4EAA25' },
+  { id: 'sql', name: 'SQL', color: '#003B57' },
+  { id: 'csharp', name: 'C#', color: '#239120' },
+  { id: 'ruby', name: 'Ruby', color: '#CC342D' },
+  { id: 'php', name: 'PHP', color: '#777BB4' },
+  { id: 'kotlin', name: 'Kotlin', color: '#7F52FF' },
+  { id: 'swift', name: 'Swift', color: '#F05138' },
+  { id: 'lua', name: 'Lua', color: '#000080' },
+  { id: 'haskell', name: 'Haskell', color: '#5D4F85' },
+  { id: 'html', name: 'HTML', color: '#E34F26' },
+];
+
+function _nbRenderCellStatus(cellId) {
+  const el = document.getElementById('nb-cell-' + cellId);
+  if (!el) return;
+  const isExec = _nbState.executingCells.has(cellId);
+  el.classList.toggle('executing', isExec);
+  const btn = el.querySelector('.nb-run-btn');
+  if (btn) {
+    btn.innerHTML = isExec
+      ? '<svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="6" width="12" height="12" rx="2"/></svg>'
+      : '<svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><polygon points="5 3 19 12 5 21 5 3"/></svg>';
+  }
+}
+
+function _nbRenderCellOutput(cellId) {
+  const container = document.getElementById('nb-output-' + cellId);
+  if (!container) return;
+  const outputs = _nbState.outputs[cellId] || [];
+  if (outputs.length === 0) { container.innerHTML = ''; container.style.display = 'none'; return; }
+  container.style.display = 'block';
+
+  let html = '';
+  for (const out of outputs) {
+    if (out.type === 'stream') {
+      const cls = out.name === 'stderr' ? 'nb-out-stderr' : 'nb-out-stdout';
+      html += `<pre class="${cls}">${esc(out.text)}</pre>`;
+    } else if (out.type === 'error') {
+      html += `<div class="nb-out-error"><strong>${esc(out.ename || 'Error')}: ${esc(out.evalue || '')}</strong>`;
+      if (out.traceback && out.traceback.length) {
+        html += `<pre class="nb-out-traceback">${esc(out.traceback.join('\n'))}</pre>`;
+      }
+      html += `</div>`;
+    } else if (out.type === 'execute_result' || out.type === 'display_data') {
+      const data = out.data || {};
+      if (data['text/html']) html += `<div class="nb-out-html">${data['text/html']}</div>`;
+      else if (data['image/png']) html += `<img class="nb-out-img" src="data:image/png;base64,${data['image/png']}">`;
+      else if (data['text/plain']) html += `<pre class="nb-out-stdout">${esc(data['text/plain'])}</pre>`;
+    }
+  }
+  container.innerHTML = html;
+}
+
+function renderNotebooks() {
+  const el = document.getElementById('page-content');
+  el.className = 'page nb-page-container';
+  el.style.padding = '0';
+  el.style.overflow = 'hidden';
+  el.style.display = 'flex';
+
+  const nb = _nbState.current ? _nbState.notebooks.find(n => n.id === _nbState.current) : null;
+
+  el.innerHTML = `
+    <div class="nb-sidebar ${_nbState.sidebarOpen ? '' : 'collapsed'}">
+      <div class="nb-sidebar-header">
+        <span class="nb-sidebar-title">Explorer</span>
+        <button class="icon-btn nb-sidebar-toggle" title="Toggle sidebar">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2"/><line x1="9" y1="3" x2="9" y2="21"/></svg>
+        </button>
+      </div>
+      <button class="btn btn-sm btn-primary nb-new-btn" style="margin:8px 12px;width:calc(100% - 24px)">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+        New Notebook
+      </button>
+      <div class="nb-sidebar-list">
+        ${_nbState.notebooks.map(n => `
+          <div class="nb-sidebar-item ${n.id === _nbState.current ? 'active' : ''}" data-id="${n.id}">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z"/><path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z"/></svg>
+            <span class="nb-item-title">${esc(n.title)}</span>
+            ${n.id !== _nbState.current ? `<button class="icon-btn nb-item-del" data-del="${n.id}" title="Delete">&times;</button>` : ''}
+          </div>
+        `).join('')}
+      </div>
+    </div>
+    <div class="nb-main">
+      <div class="nb-toolbar">
+        <button class="icon-btn nb-sidebar-toggle-main" title="Toggle Explorer">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2"/><line x1="9" y1="3" x2="9" y2="21"/></svg>
+        </button>
+        ${nb ? `
+        <input class="nb-title-input" id="nb-title" value="${esc(nb.title)}" placeholder="Notebook title">
+        <div class="nb-toolbar-actions">
+          <button class="btn btn-sm btn-outline nb-add-code" title="Add Code Cell">+ Code</button>
+          <button class="btn btn-sm btn-outline nb-add-md" title="Add Markdown Cell">+ Markdown</button>
+          <button class="btn btn-sm btn-outline nb-clear-outputs" title="Clear All Outputs">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M1 4v10l4-4"/><path d="M23 20V10l-4 4"/></svg>
+            Clear
+          </button>
+          <button class="btn btn-sm btn-outline nb-download" title="Download as .ipynb">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+            .ipynb
+          </button>
+          <button class="btn btn-sm btn-primary nb-run-all" title="Run All Cells">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><polygon points="5 3 19 12 5 21 5 3"/></svg>
+            Run All
+          </button>
+        </div>
+        ` : '<span style="color:var(--muted);padding:0 12px">Select or create a notebook</span>'}
+      </div>
+      <div class="nb-cells" id="nb-cells">
+        ${nb ? _nbRenderAllCells() : `
+          <div class="nb-empty">
+            <svg width="64" height="64" viewBox="0 0 24 24" fill="none" stroke="var(--muted)" stroke-width="1"><path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z"/><path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z"/></svg>
+            <h3>MAC Notebooks</h3>
+            <p class="muted">Create a new notebook to start coding — 25+ languages, offline, Colab-style.</p>
+            <button class="btn btn-primary nb-empty-create">Create Notebook</button>
+          </div>
+        `}
+      </div>
+    </div>`;
+
+  _nbBindAll();
+  if (_nbState.current) _nbConnectWs();
+}
+
+function _nbRenderAllCells() {
+  return _nbState.cells.map((cell, idx) => _nbRenderCell(cell, idx)).join('') + `
+    <div class="nb-add-cell-bar">
+      <button class="btn btn-sm btn-outline nb-add-code-bottom">+ Code</button>
+      <button class="btn btn-sm btn-outline nb-add-md-bottom">+ Markdown</button>
+    </div>`;
+}
+
+function _nbRenderCell(cell, idx) {
+  const lang = NB_LANGUAGES.find(l => l.id === cell.language) || { id: cell.language || 'python', name: cell.language || 'Python', color: '#666' };
+  const isExec = _nbState.executingCells.has(cell.id);
+  const outputs = _nbState.outputs[cell.id] || [];
+  const hasOutput = outputs.length > 0;
+
+  if (cell.type === 'markdown') {
+    return `
+    <div class="nb-cell nb-cell-md ${isExec ? 'executing' : ''}" id="nb-cell-${cell.id}" data-cell="${cell.id}">
+      <div class="nb-cell-gutter">
+        <span class="nb-cell-num">${idx + 1}</span>
+      </div>
+      <div class="nb-cell-content">
+        <div class="nb-cell-toolbar">
+          <span class="nb-cell-type-badge" style="background:${lang.color}20;color:${lang.color}">Markdown</span>
+          <div class="nb-cell-actions">
+            <button class="icon-btn nb-move-up" data-cell="${cell.id}" title="Move up"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="18 15 12 9 6 15"/></svg></button>
+            <button class="icon-btn nb-move-down" data-cell="${cell.id}" title="Move down"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="6 9 12 15 18 9"/></svg></button>
+            <button class="icon-btn nb-del-cell" data-cell="${cell.id}" title="Delete"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg></button>
+          </div>
+        </div>
+        <div class="nb-md-preview" data-cell="${cell.id}">${cell.source ? formatMd(cell.source) : '<em class="muted">Click to edit markdown…</em>'}</div>
+        <textarea class="nb-md-editor" data-cell="${cell.id}" style="display:none" rows="4">${esc(cell.source)}</textarea>
+      </div>
+    </div>`;
+  }
+
+  // Code cell
+  return `
+  <div class="nb-cell nb-cell-code ${isExec ? 'executing' : ''}" id="nb-cell-${cell.id}" data-cell="${cell.id}">
+    <div class="nb-cell-gutter">
+      <button class="icon-btn nb-run-btn" data-cell="${cell.id}" title="Run (Shift+Enter)">
+        ${isExec
+          ? '<svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="6" width="12" height="12" rx="2"/></svg>'
+          : '<svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><polygon points="5 3 19 12 5 21 5 3"/></svg>'}
+      </button>
+      <span class="nb-cell-num">[${idx + 1}]</span>
+    </div>
+    <div class="nb-cell-content">
+      <div class="nb-cell-toolbar">
+        <select class="nb-lang-select" data-cell="${cell.id}">
+          ${NB_LANGUAGES.map(l => `<option value="${l.id}" ${l.id === (cell.language || 'python') ? 'selected' : ''}>${l.name}</option>`).join('')}
+        </select>
+        <span class="nb-lang-dot" style="background:${lang.color}"></span>
+        <div class="nb-cell-actions">
+          <button class="icon-btn nb-move-up" data-cell="${cell.id}" title="Move up"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="18 15 12 9 6 15"/></svg></button>
+          <button class="icon-btn nb-move-down" data-cell="${cell.id}" title="Move down"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="6 9 12 15 18 9"/></svg></button>
+          <button class="icon-btn nb-del-cell" data-cell="${cell.id}" title="Delete"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg></button>
+        </div>
+      </div>
+      <textarea class="nb-code-editor" data-cell="${cell.id}" spellcheck="false" rows="${Math.max(3, (cell.source || '').split('\n').length)}">${esc(cell.source)}</textarea>
+      <div class="nb-cell-output ${hasOutput ? '' : 'empty'}" id="nb-output-${cell.id}" style="${hasOutput ? '' : 'display:none'}">${hasOutput ? '' : ''}</div>
+    </div>
+  </div>`;
+}
+
+function _nbRefreshCells() {
+  const container = document.getElementById('nb-cells');
+  if (!container) return;
+  container.innerHTML = _nbRenderAllCells();
+  _nbBindCells();
+  // Re-render outputs
+  for (const cellId of Object.keys(_nbState.outputs)) {
+    _nbRenderCellOutput(cellId);
+  }
+}
+
+function _nbBindAll() {
+  // New notebook buttons
+  document.querySelectorAll('.nb-new-btn, .nb-empty-create').forEach(btn => {
+    btn.onclick = () => { _nbCreate('Untitled Notebook'); renderNotebooks(); };
+  });
+
+  // Sidebar items
+  document.querySelectorAll('.nb-sidebar-item').forEach(item => {
+    item.onclick = (e) => {
+      if (e.target.closest('.nb-item-del')) return;
+      _nbSave(); // Save current before switching
+      _nbLoad(item.dataset.id);
+      renderNotebooks();
+    };
+  });
+  document.querySelectorAll('.nb-item-del').forEach(btn => {
+    btn.onclick = (e) => { e.stopPropagation(); if (confirm('Delete this notebook?')) { _nbDelete(btn.dataset.del); renderNotebooks(); } };
+  });
+
+  // Sidebar toggle
+  document.querySelectorAll('.nb-sidebar-toggle, .nb-sidebar-toggle-main').forEach(btn => {
+    btn.onclick = () => { _nbState.sidebarOpen = !_nbState.sidebarOpen; renderNotebooks(); };
+  });
+
+  // Title input
+  const titleInput = document.getElementById('nb-title');
+  if (titleInput) {
+    titleInput.onchange = () => {
+      const nb = _nbState.notebooks.find(n => n.id === _nbState.current);
+      if (nb) { nb.title = titleInput.value; _nbSave(); }
+    };
+  }
+
+  // Toolbar actions
+  const addCode = document.querySelector('.nb-add-code');
+  if (addCode) addCode.onclick = () => { _nbAddCell('code'); };
+  const addMd = document.querySelector('.nb-add-md');
+  if (addMd) addMd.onclick = () => { _nbAddCell('markdown'); };
+
+  document.querySelector('.nb-clear-outputs')?.addEventListener('click', () => {
+    _nbState.outputs = {};
+    _nbSave();
+    _nbRefreshCells();
+  });
+
+  document.querySelector('.nb-download')?.addEventListener('click', _nbDownloadIpynb);
+  document.querySelector('.nb-run-all')?.addEventListener('click', _nbRunAll);
+
+  _nbBindCells();
+}
+
+function _nbBindCells() {
+  // Code editors - auto-resize and save
+  document.querySelectorAll('.nb-code-editor').forEach(ta => {
+    const cellId = ta.dataset.cell;
+    ta.oninput = () => {
+      const cell = _nbState.cells.find(c => c.id === cellId);
+      if (cell) { cell.source = ta.value; _nbSave(); }
+      ta.rows = Math.max(3, ta.value.split('\n').length);
+    };
+    ta.onkeydown = (e) => {
+      // Shift+Enter to run
+      if (e.key === 'Enter' && e.shiftKey) {
+        e.preventDefault();
+        _nbExecCell(cellId);
+      }
+      // Tab for indentation
+      if (e.key === 'Tab') {
+        e.preventDefault();
+        const start = ta.selectionStart;
+        const end = ta.selectionEnd;
+        ta.value = ta.value.substring(0, start) + '    ' + ta.value.substring(end);
+        ta.selectionStart = ta.selectionEnd = start + 4;
+        ta.oninput();
+      }
+    };
+  });
+
+  // Run buttons
+  document.querySelectorAll('.nb-run-btn').forEach(btn => {
+    btn.onclick = () => _nbExecCell(btn.dataset.cell);
+  });
+
+  // Language selectors
+  document.querySelectorAll('.nb-lang-select').forEach(sel => {
+    sel.onchange = () => {
+      const cell = _nbState.cells.find(c => c.id === sel.dataset.cell);
+      if (cell) { cell.language = sel.value; _nbSave(); }
+    };
+  });
+
+  // Move up/down
+  document.querySelectorAll('.nb-move-up').forEach(btn => {
+    btn.onclick = () => {
+      const idx = _nbState.cells.findIndex(c => c.id === btn.dataset.cell);
+      if (idx > 0) { [_nbState.cells[idx - 1], _nbState.cells[idx]] = [_nbState.cells[idx], _nbState.cells[idx - 1]]; _nbSave(); _nbRefreshCells(); }
+    };
+  });
+  document.querySelectorAll('.nb-move-down').forEach(btn => {
+    btn.onclick = () => {
+      const idx = _nbState.cells.findIndex(c => c.id === btn.dataset.cell);
+      if (idx < _nbState.cells.length - 1) { [_nbState.cells[idx], _nbState.cells[idx + 1]] = [_nbState.cells[idx + 1], _nbState.cells[idx]]; _nbSave(); _nbRefreshCells(); }
+    };
+  });
+
+  // Delete cell
+  document.querySelectorAll('.nb-del-cell').forEach(btn => {
+    btn.onclick = () => {
+      _nbState.cells = _nbState.cells.filter(c => c.id !== btn.dataset.cell);
+      delete _nbState.outputs[btn.dataset.cell];
+      _nbSave();
+      _nbRefreshCells();
+    };
+  });
+
+  // Markdown preview/edit toggle
+  document.querySelectorAll('.nb-md-preview').forEach(preview => {
+    preview.onclick = () => {
+      const editor = preview.parentElement.querySelector('.nb-md-editor');
+      preview.style.display = 'none';
+      editor.style.display = 'block';
+      editor.focus();
+    };
+  });
+  document.querySelectorAll('.nb-md-editor').forEach(editor => {
+    editor.oninput = () => {
+      const cell = _nbState.cells.find(c => c.id === editor.dataset.cell);
+      if (cell) { cell.source = editor.value; _nbSave(); }
+    };
+    editor.onblur = () => {
+      const preview = editor.parentElement.querySelector('.nb-md-preview');
+      const cell = _nbState.cells.find(c => c.id === editor.dataset.cell);
+      preview.innerHTML = cell && cell.source ? formatMd(cell.source) : '<em class="muted">Click to edit markdown…</em>';
+      preview.style.display = 'block';
+      editor.style.display = 'none';
+    };
+  });
+
+  // Bottom add-cell buttons
+  document.querySelectorAll('.nb-add-code-bottom').forEach(btn => { btn.onclick = () => _nbAddCell('code'); });
+  document.querySelectorAll('.nb-add-md-bottom').forEach(btn => { btn.onclick = () => _nbAddCell('markdown'); });
+}
+
+function _nbAddCell(type, afterIdx) {
+  const cell = { id: _cellNewId(), type, source: '', language: type === 'code' ? 'python' : undefined };
+  if (afterIdx !== undefined) {
+    _nbState.cells.splice(afterIdx + 1, 0, cell);
+  } else {
+    _nbState.cells.push(cell);
+  }
+  _nbSave();
+  _nbRefreshCells();
+  // Scroll to new cell
+  setTimeout(() => {
+    const el = document.getElementById('nb-cell-' + cell.id);
+    if (el) el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+  }, 100);
+}
+
+async function _nbRunAll() {
+  for (const cell of _nbState.cells) {
+    if (cell.type === 'code') {
+      _nbExecCell(cell.id);
+      // Wait a bit between cells for sequential execution
+      await new Promise(r => setTimeout(r, 500));
+    }
+  }
+}
+
+function _nbDownloadIpynb() {
+  const nb = _nbState.notebooks.find(n => n.id === _nbState.current);
+  if (!nb) return;
+
+  const ipynb = {
+    nbformat: 4,
+    nbformat_minor: 5,
+    metadata: {
+      kernelspec: { display_name: 'Python 3', language: 'python', name: 'python3' },
+      language_info: { name: nb.language || 'python', version: '3.11' },
+    },
+    cells: _nbState.cells.map(cell => {
+      const outputs = (_nbState.outputs[cell.id] || []).map(out => {
+        if (out.type === 'stream') return { output_type: 'stream', name: out.name, text: [out.text] };
+        if (out.type === 'error') return { output_type: 'error', ename: out.ename, evalue: out.evalue, traceback: out.traceback };
+        return { output_type: 'display_data', data: out.data || {}, metadata: {} };
+      });
+      return {
+        cell_type: cell.type === 'code' ? 'code' : 'markdown',
+        source: (cell.source || '').split('\n').map((l, i, arr) => i < arr.length - 1 ? l + '\n' : l),
+        metadata: { language: cell.language },
+        ...(cell.type === 'code' ? { execution_count: null, outputs } : {}),
+      };
+    }),
+  };
+
+  const blob = new Blob([JSON.stringify(ipynb, null, 2)], { type: 'application/json' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = (nb.title || 'notebook').replace(/[^a-zA-Z0-9_-]/g, '_') + '.ipynb';
+  a.click();
+  URL.revokeObjectURL(a.href);
+}
+
 
 /* ═══════════════════════════════════════════════════════════
    NOTIFICATIONS — Bell, Panel, Push Subscription
@@ -2614,6 +4358,19 @@ async function subscribeToPush() {
       }),
     });
   } catch {}
+}
+
+/* Request browser notification permission on every login */
+async function requestNotificationPermission() {
+  if (!('Notification' in window)) return;
+  try { await Notification.requestPermission(); } catch {}
+}
+
+/* Real-time notification polling — updates badge every 15s */
+function startNotifPolling() {
+  if (_notifPollIv) clearInterval(_notifPollIv);
+  loadNotifCount();
+  _notifPollIv = setInterval(() => loadNotifCount(), 15000);
 }
 
 function urlBase64ToUint8Array(base64String) {

@@ -339,3 +339,100 @@ async def get_student_summary(
         })
 
     return sorted(summaries, key=lambda x: x["attendance_pct"], reverse=True)
+
+
+async def get_marked_session_ids(db: AsyncSession, user_id: str, for_date: date) -> set:
+    """Return set of session IDs the user has already marked for a given date."""
+    # Get session IDs for that date
+    sessions_result = await db.execute(
+        select(AttendanceSession.id).where(AttendanceSession.session_date == for_date)
+    )
+    session_ids = [row[0] for row in sessions_result.all()]
+    if not session_ids:
+        return set()
+    records_result = await db.execute(
+        select(AttendanceRecord.session_id).where(
+            AttendanceRecord.user_id == user_id,
+            AttendanceRecord.session_id.in_(session_ids),
+        )
+    )
+    return {row[0] for row in records_result.all()}
+
+
+async def get_admin_overview(
+    db: AsyncSession,
+    department: Optional[str] = None,
+    date_from: Optional[date] = None,
+    date_to: Optional[date] = None,
+    page: int = 1,
+    per_page: int = 30,
+) -> dict:
+    """Enriched overview: each session with opener name, student records, confidence stats."""
+    sessions, total = await list_sessions(
+        db, department=department, date_from=date_from, date_to=date_to,
+        page=page, per_page=per_page,
+    )
+    if not sessions:
+        return {"sessions": [], "total": 0, "page": page, "per_page": per_page}
+
+    session_ids = [s.id for s in sessions]
+    opener_ids = list({s.opened_by for s in sessions})
+
+    # Fetch all openers at once
+    openers_result = await db.execute(select(User).where(User.id.in_(opener_ids)))
+    openers_map = {u.id: u for u in openers_result.scalars().all()}
+
+    # Fetch all records for these sessions with student details
+    records_result = await db.execute(
+        select(AttendanceRecord).where(AttendanceRecord.session_id.in_(session_ids))
+        .order_by(AttendanceRecord.marked_at.desc())
+    )
+    all_records = list(records_result.scalars().all())
+
+    student_ids = list({r.user_id for r in all_records})
+    students_map: dict = {}
+    if student_ids:
+        students_result = await db.execute(select(User).where(User.id.in_(student_ids)))
+        students_map = {u.id: u for u in students_result.scalars().all()}
+
+    # Group records by session
+    records_by_session: dict = {}
+    for r in all_records:
+        records_by_session.setdefault(r.session_id, []).append(r)
+
+    enriched = []
+    for s in sessions:
+        opener = openers_map.get(s.opened_by)
+        recs = records_by_session.get(s.id, [])
+        avg_confidence = (sum(r.face_match_confidence for r in recs) / len(recs)) if recs else None
+        enriched.append({
+            "id": s.id,
+            "title": s.title,
+            "department": s.department,
+            "subject": s.subject,
+            "session_date": s.session_date.isoformat(),
+            "is_open": s.is_open,
+            "opened_at": s.opened_at.isoformat(),
+            "closed_at": s.closed_at.isoformat() if s.closed_at else None,
+            "opened_by_id": s.opened_by,
+            "opened_by_name": opener.name if opener else "Unknown",
+            "opened_by_email": opener.email if opener else None,
+            "record_count": len(recs),
+            "avg_confidence": round(avg_confidence * 100, 1) if avg_confidence else None,
+            "students": [
+                {
+                    "record_id": r.id,
+                    "user_id": r.user_id,
+                    "name": students_map[r.user_id].name if r.user_id in students_map else "Unknown",
+                    "roll_number": students_map[r.user_id].roll_number if r.user_id in students_map else None,
+                    "department": students_map[r.user_id].department if r.user_id in students_map else None,
+                    "face_verified": r.face_verified,
+                    "confidence": round(r.face_match_confidence * 100, 1),
+                    "marked_at": r.marked_at.isoformat(),
+                    "ip_address": r.ip_address,
+                }
+                for r in recs
+            ],
+        })
+
+    return {"sessions": enriched, "total": total, "page": page, "per_page": per_page}

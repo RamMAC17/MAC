@@ -138,6 +138,10 @@ async def heartbeat_loop(client: httpx.AsyncClient, node_id: str):
     while True:
         try:
             metrics = get_resource_metrics()
+
+            # Include notebook kernel capacity info
+            metrics["notebook_ready"] = _notebook_available()
+
             resp = await client.post(
                 f"{API}/nodes/heartbeat/{node_id}",
                 json=metrics
@@ -184,6 +188,114 @@ async def wait_for_vllm():
             await asyncio.sleep(5)
     print("[AGENT] WARNING: vLLM did not become ready in time")
     return False
+
+
+def _notebook_available() -> bool:
+    """Check if this worker can execute notebook kernels (Docker or subprocess)."""
+    import shutil
+    return shutil.which("docker") is not None or shutil.which("python3") is not None or shutil.which("python") is not None
+
+
+KERNEL_PORT = int(os.environ.get("KERNEL_PORT", 8090))
+
+
+async def start_kernel_server():
+    """Start a lightweight HTTP server for notebook code execution requests from control node."""
+    from http.server import HTTPServer, BaseHTTPRequestHandler
+    import subprocess as _sp
+    import tempfile
+    import shutil
+    import threading
+
+    class KernelHandler(BaseHTTPRequestHandler):
+        def do_POST(self):
+            if self.path != "/execute":
+                self.send_response(404)
+                self.end_headers()
+                return
+
+            length = int(self.headers.get("Content-Length", 0))
+            body = json.loads(self.rfile.read(length)) if length else {}
+            code = body.get("code", "")
+            language = body.get("language", "python")
+            timeout = body.get("timeout", 120)
+
+            result = self._execute_code(code, language, timeout)
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(json.dumps(result).encode())
+
+        def _execute_code(self, code, language, timeout):
+            ext_map = {
+                "python": ".py", "javascript": ".js", "c": ".c", "cpp": ".cpp",
+                "java": ".java", "go": ".go", "rust": ".rs", "bash": ".sh",
+                "r": ".r", "ruby": ".rb", "php": ".php", "lua": ".lua",
+            }
+            binary_map = {
+                "python": sys.executable or "python3",
+                "javascript": "node", "bash": "bash", "r": "Rscript",
+                "ruby": "ruby", "php": "php", "lua": "lua",
+            }
+            ext = ext_map.get(language, ".txt")
+
+            with tempfile.NamedTemporaryFile(mode="w", suffix=ext, delete=False) as f:
+                f.write(code)
+                temp = f.name
+
+            try:
+                binary = binary_map.get(language)
+                if language in ("c", "cpp"):
+                    compiler = "gcc" if language == "c" else "g++"
+                    out = temp + ".out"
+                    comp = _sp.run([compiler, temp, "-o", out], capture_output=True, timeout=30)
+                    if comp.returncode != 0:
+                        return {"stdout": "", "stderr": comp.stderr.decode("utf-8", errors="replace"), "exit_code": comp.returncode}
+                    result = _sp.run([out], capture_output=True, timeout=timeout)
+                elif language == "go":
+                    result = _sp.run(["go", "run", temp], capture_output=True, timeout=timeout)
+                elif language == "rust":
+                    out = temp + ".out"
+                    comp = _sp.run(["rustc", temp, "-o", out], capture_output=True, timeout=30)
+                    if comp.returncode != 0:
+                        return {"stdout": "", "stderr": comp.stderr.decode("utf-8", errors="replace"), "exit_code": comp.returncode}
+                    result = _sp.run([out], capture_output=True, timeout=timeout)
+                elif language == "java":
+                    result = _sp.run(["java", temp], capture_output=True, timeout=timeout)
+                elif binary:
+                    if shutil.which(binary):
+                        result = _sp.run([binary, temp], capture_output=True, timeout=timeout)
+                    else:
+                        return {"stdout": "", "stderr": f"'{binary}' not found on this worker", "exit_code": -1}
+                else:
+                    return {"stdout": "", "stderr": f"Unsupported language: {language}", "exit_code": -1}
+
+                return {
+                    "stdout": result.stdout.decode("utf-8", errors="replace"),
+                    "stderr": result.stderr.decode("utf-8", errors="replace"),
+                    "exit_code": result.returncode,
+                }
+            except _sp.TimeoutExpired:
+                return {"stdout": "", "stderr": f"Execution timed out ({timeout}s)", "exit_code": -1}
+            except FileNotFoundError as e:
+                return {"stdout": "", "stderr": str(e), "exit_code": -1}
+            finally:
+                for p in [temp, temp + ".out"]:
+                    try:
+                        os.unlink(p)
+                    except OSError:
+                        pass
+
+        def log_message(self, format, *args):
+            print(f"[KERNEL] {args[0]}")
+
+    def _run_server():
+        server = HTTPServer(("0.0.0.0", KERNEL_PORT), KernelHandler)
+        print(f"[AGENT] Kernel execution server listening on port {KERNEL_PORT}")
+        server.serve_forever()
+
+    t = threading.Thread(target=_run_server, daemon=True)
+    t.start()
 
 
 async def detect_vllm_model():
@@ -248,6 +360,10 @@ async def main():
     print(f"[AGENT] Control node: {CONTROL_URL}")
     if VLLM_MODEL:
         print(f"[AGENT] Configured model: {VLLM_MODEL}")
+
+    # Start kernel execution server for notebook support
+    if _notebook_available():
+        await start_kernel_server()
 
     await wait_for_vllm()
 

@@ -60,3 +60,18 @@ class AttendanceRecord(Base):
     marked_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
 
     session: Mapped["AttendanceSession"] = relationship(back_populates="records")
+
+
+class AttendanceSettings(Base):
+    """Global attendance window settings — only one row (singleton, id='default')."""
+    __tablename__ = "attendance_settings"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default="default")
+    # Window open: default 00:01 IST
+    open_hour: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    open_minute: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
+    # Window close: default 12:01 IST
+    close_hour: Mapped[int] = mapped_column(Integer, default=12, nullable=False)
+    close_minute: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, onupdate=_utcnow)
+    updated_by: Mapped[str | None] = mapped_column(String(36), nullable=True)

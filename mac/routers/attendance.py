@@ -3,10 +3,12 @@
 from datetime import date, datetime, timezone, timedelta
 from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException, Request, Query
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from mac.database import get_db
 from mac.middleware.auth_middleware import get_current_user, require_admin
 from mac.models.user import User
+from mac.models.attendance import AttendanceSettings
 from mac.schemas.attendance import (
     CreateAttendanceSessionRequest, AttendanceSessionResponse,
     MarkAttendanceRequest, AttendanceRecordResponse,
@@ -26,14 +28,88 @@ def _require_faculty_or_admin(user: User = Depends(get_current_user)) -> User:
     return user
 
 
-def _check_attendance_hours():
-    """Attendance sessions: create & mark only between 12:00 AM and 12:00 PM IST."""
-    now_ist = datetime.now(IST)
-    if now_ist.hour >= 12:
+async def _get_settings(db: AsyncSession) -> AttendanceSettings:
+    """Fetch singleton attendance window settings, creating defaults if missing."""
+    result = await db.execute(select(AttendanceSettings).where(AttendanceSettings.id == "default"))
+    cfg = result.scalar_one_or_none()
+    if cfg is None:
+        cfg = AttendanceSettings(id="default")
+        db.add(cfg)
+        await db.flush()
+    return cfg
+
+
+async def _check_attendance_window(db: AsyncSession):
+    """Allow actions only within the configured daily window. Dev mode always open."""
+    from mac.config import settings
+    if settings.is_dev:
+        return
+    cfg = await _get_settings(db)
+    now = datetime.now(IST)
+    now_minutes = now.hour * 60 + now.minute
+    open_minutes = cfg.open_hour * 60 + cfg.open_minute
+    close_minutes = cfg.close_hour * 60 + cfg.close_minute
+    if not (open_minutes <= now_minutes < close_minutes):
         raise HTTPException(
             status_code=400,
-            detail="Attendance window closed. Sessions are active only before 12:00 PM (noon) IST.",
+            detail=f"Attendance window closed. Active {cfg.open_hour:02d}:{cfg.open_minute:02d}–{cfg.close_hour:02d}:{cfg.close_minute:02d} IST.",
         )
+
+
+# ── Attendance Window Settings ────────────────────────────────────
+
+@router.get("/settings")
+async def get_attendance_settings(
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Get current attendance window settings."""
+    cfg = await _get_settings(db)
+    now = datetime.now(IST)
+    now_minutes = now.hour * 60 + now.minute
+    open_minutes = cfg.open_hour * 60 + cfg.open_minute
+    close_minutes = cfg.close_hour * 60 + cfg.close_minute
+    return {
+        "open_hour": cfg.open_hour,
+        "open_minute": cfg.open_minute,
+        "close_hour": cfg.close_hour,
+        "close_minute": cfg.close_minute,
+        "window_open_now": open_minutes <= now_minutes < close_minutes,
+        "updated_at": cfg.updated_at.isoformat() if cfg.updated_at else None,
+    }
+
+
+@router.put("/settings")
+async def update_attendance_settings(
+    body: dict,
+    user: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    """Admin: update attendance window open/close times (IST)."""
+    cfg = await _get_settings(db)
+    if "open_hour" in body:
+        cfg.open_hour = int(body["open_hour"])
+    if "open_minute" in body:
+        cfg.open_minute = int(body["open_minute"])
+    if "close_hour" in body:
+        cfg.close_hour = int(body["close_hour"])
+    if "close_minute" in body:
+        cfg.close_minute = int(body["close_minute"])
+    cfg.updated_by = user.id
+    cfg.updated_at = datetime.now(timezone.utc)
+    await notification_service.log_audit(
+        db, action="attendance.settings_update", resource_type="attendance_settings",
+        actor_id=user.id, actor_role=user.role,
+        details=f"Window: {cfg.open_hour:02d}:{cfg.open_minute:02d}–{cfg.close_hour:02d}:{cfg.close_minute:02d}",
+    )
+    now = datetime.now(IST)
+    now_minutes = now.hour * 60 + now.minute
+    return {
+        "open_hour": cfg.open_hour, "open_minute": cfg.open_minute,
+        "close_hour": cfg.close_hour, "close_minute": cfg.close_minute,
+        "window_open_now": (cfg.open_hour * 60 + cfg.open_minute) <= now_minutes < (cfg.close_hour * 60 + cfg.close_minute),
+        "updated_at": cfg.updated_at.isoformat(),
+    }
 
 
 # Default subjects
@@ -86,7 +162,7 @@ async def create_session(
     db: AsyncSession = Depends(get_db),
 ):
     """Create a new attendance session for a department/subject."""
-    _check_attendance_hours()
+    await _check_attendance_window(db)
     session = await attendance_service.create_session(
         db, title=req.title, department=req.department,
         opened_by=user.id, session_date=req.session_date,
@@ -123,7 +199,7 @@ async def list_sessions(
     date_from: Optional[date] = None,
     date_to: Optional[date] = None,
     page: int = Query(1, ge=1),
-    per_page: int = Query(20, ge=1, le=100),
+    per_page: int = Query(50, ge=1, le=200),
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
@@ -161,7 +237,7 @@ async def mark_attendance(
     db: AsyncSession = Depends(get_db),
 ):
     """Mark attendance for a session with live face verification."""
-    _check_attendance_hours()
+    await _check_attendance_window(db)
     ip = request.client.host if request.client else None
     result = await attendance_service.mark_attendance(
         db, session_id=req.session_id, user_id=user.id,
@@ -186,11 +262,28 @@ async def session_report(
     user: User = Depends(_require_faculty_or_admin),
     db: AsyncSession = Depends(get_db),
 ):
-    """Get full attendance report for a session with student details."""
+    """Full attendance report for a session with student details."""
     report = await attendance_service.get_session_report(db, session_id)
     if not report:
         raise HTTPException(status_code=404, detail="Session not found")
     return report
+
+
+@router.get("/admin/overview")
+async def admin_overview(
+    department: Optional[str] = None,
+    date_from: Optional[date] = None,
+    date_to: Optional[date] = None,
+    page: int = Query(1, ge=1),
+    per_page: int = Query(30, ge=1, le=100),
+    user: User = Depends(_require_faculty_or_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    """Admin/Faculty: all sessions enriched with opener name, record count, student list."""
+    return await attendance_service.get_admin_overview(
+        db, department=department, date_from=date_from, date_to=date_to,
+        page=page, per_page=per_page,
+    )
 
 
 @router.get("/summary")
@@ -199,6 +292,6 @@ async def attendance_summary(
     user: User = Depends(_require_faculty_or_admin),
     db: AsyncSession = Depends(get_db),
 ):
-    """Get attendance summary per student across all sessions."""
+    """Per-student attendance summary across all sessions."""
     summaries = await attendance_service.get_student_summary(db, department=department)
     return {"students": summaries, "total": len(summaries)}

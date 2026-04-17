@@ -1,6 +1,6 @@
 """Authentication endpoints — /auth."""
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, UploadFile, File
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func
 from mac.database import get_db
@@ -8,10 +8,13 @@ from mac.schemas.auth import (
     LoginRequest, LoginResponse, RefreshRequest, RefreshResponse,
     ChangePasswordRequest, MessageResponse, UserProfileWithQuota, QuotaInfo, UserProfile,
     SignupRequest, SetPasswordRequest, VerifyRequest,
+    AdminCreateUserRequest, AdminEditUserRequest, UpdateProfileRequest,
+    UpdateRoleRequest, UpdateStatusRequest,
+    RegistryEntryRequest, BulkRegistryRequest,
 )
 from mac.services import auth_service
 from mac.services.usage_service import get_tokens_used_today, get_requests_this_hour
-from mac.middleware.auth_middleware import get_current_user, require_admin
+from mac.middleware.auth_middleware import get_current_user, require_admin, require_faculty_or_admin
 from mac.models.user import User, StudentRegistry
 from mac.config import settings
 
@@ -174,17 +177,17 @@ async def me(user: User = Depends(get_current_user), db: AsyncSession = Depends(
 
 @router.put("/me/profile", response_model=MessageResponse)
 async def update_profile(
-    body: dict,
+    body: UpdateProfileRequest,
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
     """Update own profile fields (name, email, department for admins)."""
-    if "name" in body:
-        user.name = body["name"][:100]
-    if "email" in body:
-        user.email = body["email"][:200] if body["email"] else None
-    if "department" in body and body["department"] and user.role == "admin":
-        user.department = body["department"][:50]
+    if body.name is not None:
+        user.name = body.name
+    if body.email is not None:
+        user.email = body.email or None
+    if body.department is not None and user.role == "admin":
+        user.department = body.department
     await db.flush()
     return MessageResponse(message="Profile updated")
 
@@ -243,59 +246,45 @@ async def list_users(admin: User = Depends(require_admin), db: AsyncSession = De
 
 @router.post("/admin/users")
 async def create_user_admin(
-    body: dict,
+    body: AdminCreateUserRequest,
     admin: User = Depends(require_admin),
     db: AsyncSession = Depends(get_db),
 ):
     """Create a new user (admin only)."""
-    roll = body.get("roll_number", "").strip()
-    name = body.get("name", "").strip()
-    password = body.get("password", "")
-    department = body.get("department", "CSE")
-    role = body.get("role", "student")
-    email = body.get("email")
-
-    if not roll or not name or not password:
-        raise HTTPException(status_code=400, detail={"code": "validation_error", "message": "roll_number, name, password required"})
-
-    existing = await auth_service.get_user_by_roll(db, roll)
+    existing = await auth_service.get_user_by_roll(db, body.roll_number)
     if existing:
         raise HTTPException(status_code=409, detail={"code": "conflict", "message": "Roll number already exists"})
 
     user = await auth_service.create_user(
-        db, roll_number=roll, name=name, password=password,
-        department=department, role=role, email=email,
-        must_change_password=body.get("must_change_password", True),
+        db, roll_number=body.roll_number, name=body.name, password=body.password,
+        department=body.department, role=body.role, email=body.email,
+        must_change_password=body.must_change_password,
     )
     await db.commit()
-    return {"message": f"User {roll} created", "user": {"id": user.id, "roll_number": user.roll_number, "role": user.role}}
+    return {"message": f"User {body.roll_number} created", "user": {"id": user.id, "roll_number": user.roll_number, "role": user.role}}
 
 
 @router.put("/admin/users/{user_id}/role")
 async def update_user_role(
     user_id: str,
-    body: dict,
+    body: UpdateRoleRequest,
     admin: User = Depends(require_admin),
     db: AsyncSession = Depends(get_db),
 ):
     """Change a user's role (admin only)."""
-    new_role = body.get("role", "")
-    if new_role not in ("student", "faculty", "admin"):
-        raise HTTPException(status_code=400, detail={"code": "validation_error", "message": "role must be student, faculty, or admin"})
-
     user = await auth_service.get_user_by_id(db, user_id)
     if not user:
         raise HTTPException(status_code=404, detail={"code": "not_found", "message": "User not found"})
 
-    user.role = new_role
+    user.role = body.role
     await db.commit()
-    return {"message": f"User {user.roll_number} role updated to {new_role}"}
+    return {"message": f"User {user.roll_number} role updated to {body.role}"}
 
 
 @router.put("/admin/users/{user_id}")
 async def admin_edit_user(
     user_id: str,
-    body: dict,
+    body: AdminEditUserRequest,
     admin: User = Depends(require_admin),
     db: AsyncSession = Depends(get_db),
 ):
@@ -304,13 +293,16 @@ async def admin_edit_user(
     if not user:
         raise HTTPException(status_code=404, detail={"code": "not_found", "message": "User not found"})
 
-    allowed = {"name", "email", "department", "role", "is_active"}
-    for field in allowed:
-        if field in body:
-            val = body[field]
-            if field == "role" and val not in ("student", "faculty", "admin"):
-                raise HTTPException(status_code=400, detail={"code": "validation_error", "message": "role must be student, faculty, or admin"})
-            setattr(user, field, val)
+    if body.name is not None:
+        user.name = body.name
+    if body.email is not None:
+        user.email = body.email
+    if body.department is not None:
+        user.department = body.department
+    if body.role is not None:
+        user.role = body.role
+    if body.is_active is not None:
+        user.is_active = body.is_active
 
     await db.commit()
     return {
@@ -326,7 +318,7 @@ async def admin_edit_user(
 @router.put("/admin/users/{user_id}/status")
 async def toggle_user_status(
     user_id: str,
-    body: dict,
+    body: UpdateStatusRequest,
     admin: User = Depends(require_admin),
     db: AsyncSession = Depends(get_db),
 ):
@@ -335,7 +327,7 @@ async def toggle_user_status(
     if not user:
         raise HTTPException(status_code=404, detail={"code": "not_found", "message": "User not found"})
 
-    user.is_active = body.get("is_active", True)
+    user.is_active = body.is_active
     await db.commit()
     return {"message": f"User {user.roll_number} {'activated' if user.is_active else 'deactivated'}"}
 
@@ -415,20 +407,17 @@ async def list_registry(
 
 @router.post("/admin/registry")
 async def add_registry_entry(
-    body: dict,
+    body: RegistryEntryRequest,
     admin: User = Depends(require_admin),
     db: AsyncSession = Depends(get_db),
 ):
     """Add a single student to the registry."""
     from datetime import date as dt_date
-    roll = body.get("roll_number", "").strip()
-    name = body.get("name", "").strip()
-    dept = body.get("department", "CSE")
-    dob_str = body.get("dob", "")  # DD-MM-YYYY
-    batch = body.get("batch_year")
-
-    if not roll or not name or not dob_str:
-        raise HTTPException(status_code=400, detail={"code": "validation_error", "message": "roll_number, name, dob required"})
+    roll = body.roll_number.strip()
+    name = body.name.strip()
+    dept = body.department
+    dob_str = body.dob  # DD-MM-YYYY
+    batch = body.batch_year
 
     try:
         parts = dob_str.strip().split("-")
@@ -448,21 +437,20 @@ async def add_registry_entry(
 
 @router.post("/admin/registry/bulk")
 async def bulk_add_registry(
-    body: dict,
+    body: BulkRegistryRequest,
     admin: User = Depends(require_admin),
     db: AsyncSession = Depends(get_db),
 ):
     """Bulk add students. body: { students: [{roll_number, name, department, dob, batch_year}] }"""
     from datetime import date as dt_date
-    students = body.get("students", [])
     added = 0
     errors = []
-    for s in students:
-        roll = s.get("roll_number", "").strip()
-        name = s.get("name", "").strip()
-        dept = s.get("department", "CSE")
-        dob_str = s.get("dob", "")
-        batch = s.get("batch_year")
+    for s in body.students:
+        roll = s.roll_number.strip()
+        name = s.name.strip()
+        dept = s.department
+        dob_str = s.dob
+        batch = s.batch_year
         if not roll or not name or not dob_str:
             errors.append(f"{roll}: missing fields")
             continue
@@ -480,6 +468,107 @@ async def bulk_add_registry(
         added += 1
     await db.commit()
     return {"message": f"{added} students added", "errors": errors}
+
+
+@router.post("/admin/registry/upload")
+async def upload_registry_file(
+    file: UploadFile = File(...),
+    admin: User = Depends(require_faculty_or_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    """Upload a CSV or JSON file to bulk-add students to the registry.
+    CSV columns: roll_number, name, department, dob (DD-MM-YYYY), batch_year
+    JSON: array of {roll_number, name, department, dob, batch_year}"""
+    import csv
+    import io
+    import json as _json
+    from datetime import date as dt_date
+
+    if not file.filename:
+        raise HTTPException(status_code=400, detail="No file uploaded")
+
+    # Limit file size (5MB)
+    content = await file.read()
+    if len(content) > 5 * 1024 * 1024:
+        raise HTTPException(status_code=400, detail="File too large (max 5MB)")
+
+    filename_lower = file.filename.lower()
+    students = []
+
+    try:
+        text = content.decode("utf-8-sig")  # handle BOM
+    except UnicodeDecodeError:
+        raise HTTPException(status_code=400, detail="File must be UTF-8 encoded")
+
+    if filename_lower.endswith(".csv"):
+        reader = csv.DictReader(io.StringIO(text))
+        for row in reader:
+            students.append({
+                "roll_number": (row.get("roll_number") or row.get("Roll Number") or row.get("rollnumber") or "").strip(),
+                "name": (row.get("name") or row.get("Name") or row.get("student_name") or "").strip(),
+                "department": (row.get("department") or row.get("Department") or row.get("dept") or "CSE").strip(),
+                "dob": (row.get("dob") or row.get("DOB") or row.get("date_of_birth") or "").strip(),
+                "batch_year": row.get("batch_year") or row.get("Batch Year") or row.get("batch") or None,
+            })
+    elif filename_lower.endswith(".json"):
+        try:
+            data = _json.loads(text)
+        except _json.JSONDecodeError:
+            raise HTTPException(status_code=400, detail="Invalid JSON file")
+        if isinstance(data, dict):
+            students = data.get("students", [])
+        elif isinstance(data, list):
+            students = data
+        else:
+            raise HTTPException(status_code=400, detail="JSON must be an array or {students: [...]}")
+    else:
+        raise HTTPException(status_code=400, detail="Unsupported file type. Use .csv or .json")
+
+    added = 0
+    skipped = 0
+    errors = []
+    for s in students:
+        roll = str(s.get("roll_number", "")).strip()
+        name = str(s.get("name", "")).strip()
+        dept = str(s.get("department", "CSE")).strip()
+        dob_str = str(s.get("dob", "")).strip()
+        batch_raw = s.get("batch_year")
+        batch = int(batch_raw) if batch_raw and str(batch_raw).strip().isdigit() else None
+
+        if not roll or not name or not dob_str:
+            errors.append(f"{roll or '(empty)'}: missing roll_number, name, or dob")
+            continue
+
+        try:
+            sep = "-" if "-" in dob_str else "/" if "/" in dob_str else ""
+            if sep:
+                parts = dob_str.split(sep)
+                dob = dt_date(int(parts[2]), int(parts[1]), int(parts[0]))
+            elif len(dob_str) == 8 and dob_str.isdigit():
+                dob = dt_date(int(dob_str[4:8]), int(dob_str[2:4]), int(dob_str[0:2]))
+            else:
+                raise ValueError("Unrecognized format")
+        except (ValueError, IndexError):
+            errors.append(f"{roll}: invalid dob '{dob_str}' — use DD-MM-YYYY")
+            continue
+
+        existing = await auth_service.get_registry_entry(db, roll)
+        if existing:
+            skipped += 1
+            continue
+
+        db.add(StudentRegistry(
+            roll_number=roll, name=name, department=dept, dob=dob, batch_year=batch,
+        ))
+        added += 1
+
+    await db.commit()
+    return {
+        "message": f"{added} students added, {skipped} skipped (already exist)",
+        "added": added,
+        "skipped": skipped,
+        "errors": errors,
+    }
 
 
 # ── Admin: Stats overview ─────────────────────────────────

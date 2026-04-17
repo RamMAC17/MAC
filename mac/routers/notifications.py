@@ -1,8 +1,11 @@
-"""Notifications router — in-app notifications, push subscriptions, audit logs."""
+"""Notifications router — in-app notifications, push subscriptions, audit logs, SSE."""
 
 import os
+import asyncio
+import json
 from typing import Optional
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi.responses import StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 from mac.database import get_db
 from mac.middleware.auth_middleware import get_current_user, require_admin
@@ -119,3 +122,73 @@ async def get_audit_logs(
         page=page,
         per_page=per_page,
     )
+
+
+# ── SSE: Real-time Activity Stream (Admin only) ─────────
+
+@router.get("/activity-stream")
+async def activity_stream(
+    request: Request,
+    token: str = Query(...),
+    db: AsyncSession = Depends(get_db),
+):
+    """Server-Sent Events stream of latest audit log entries for admin dashboard.
+    Connect with: EventSource('/api/v1/notifications/activity-stream?token=JWT')
+    """
+    from mac.utils.security import decode_access_token
+    from mac.services.auth_service import get_user_by_id
+
+    async def _deny(msg: str):
+        yield f"event: error\ndata: {{\"detail\": \"{msg}\"}}\n\n"
+
+    # Verify JWT from query param (SSE can't set Authorization header)
+    payload = decode_access_token(token)
+    if not payload:
+        return StreamingResponse(_deny("Invalid token"), media_type="text/event-stream")
+    user = await get_user_by_id(db, payload.get("sub", ""))
+    if not user or user.role != "admin":
+        return StreamingResponse(_deny("Admin only"), media_type="text/event-stream")
+
+    last_id: list[str | None] = [None]
+
+    async def event_generator():
+        yield f"event: connected\ndata: {{\"status\": \"ok\", \"user\": \"{user.name}\"}}\n\n"
+        while True:
+            if await request.is_disconnected():
+                break
+            try:
+                from mac.database import async_session
+                async with async_session() as inner_db:
+                    logs, _ = await notification_service.get_audit_logs(inner_db, page=1, per_page=8)
+                if logs:
+                    # Send only entries newer than what we last sent
+                    if last_id[0] is None:
+                        to_send = logs[:5]
+                        last_id[0] = logs[0].id
+                    else:
+                        to_send = [l for l in logs if l.id == last_id[0]]
+                        idx = logs.index(to_send[0]) if to_send else -1
+                        to_send = logs[:idx] if idx > 0 else []
+                        if to_send:
+                            last_id[0] = logs[0].id
+                    for log in reversed(to_send):
+                        payload_data = json.dumps({
+                            "id": log.id,
+                            "action": log.action,
+                            "actor_role": log.actor_role,
+                            "resource_type": log.resource_type,
+                            "details": (log.details or "")[:200],
+                            "created_at": log.created_at.isoformat() if log.created_at else None,
+                        })
+                        yield f"event: activity\ndata: {payload_data}\n\n"
+            except Exception:
+                pass
+            yield ": heartbeat\n\n"
+            await asyncio.sleep(4)
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+

@@ -82,3 +82,58 @@ class RefreshResponse(BaseModel):
 
 class MessageResponse(BaseModel):
     message: str
+
+
+# ── Admin schemas ─────────────────────────────────────────
+
+class AdminCreateUserRequest(BaseModel):
+    roll_number: str = Field(..., min_length=1, max_length=50)
+    name: str = Field(..., min_length=1, max_length=100)
+    password: str = Field(..., min_length=8, max_length=128)
+    department: str = Field(default="CSE", max_length=50)
+    role: str = Field(default="student", pattern="^(student|faculty|admin)$")
+    email: Optional[str] = Field(default=None, max_length=200)
+    must_change_password: bool = True
+
+
+class AdminEditUserRequest(BaseModel):
+    name: Optional[str] = Field(default=None, max_length=100)
+    email: Optional[str] = Field(default=None, max_length=200)
+    department: Optional[str] = Field(default=None, max_length=50)
+    role: Optional[str] = Field(default=None, pattern="^(student|faculty|admin)$")
+    is_active: Optional[bool] = None
+
+
+class UpdateProfileRequest(BaseModel):
+    name: Optional[str] = Field(default=None, max_length=100)
+    email: Optional[str] = Field(default=None, max_length=200)
+    department: Optional[str] = Field(default=None, max_length=50)
+
+
+class UpdateRoleRequest(BaseModel):
+    role: str = Field(..., pattern="^(student|faculty|admin)$")
+
+
+class UpdateStatusRequest(BaseModel):
+    is_active: bool = True
+
+
+# ── Registry schemas ──────────────────────────────────────
+
+class RegistryEntryRequest(BaseModel):
+    roll_number: str = Field(..., min_length=1, max_length=50)
+    name: str = Field(..., min_length=1, max_length=100)
+    department: str = Field(default="CSE", max_length=50)
+    dob: str = Field(..., examples=["15-08-2003"], description="DD-MM-YYYY")
+    batch_year: Optional[int] = None
+
+
+class BulkRegistryRequest(BaseModel):
+    students: list[RegistryEntryRequest]
+
+
+# ── Kernel schemas ────────────────────────────────────────
+
+class KernelLaunchRequest(BaseModel):
+    language: str = Field(default="python", max_length=50)
+    notebook_id: Optional[str] = None

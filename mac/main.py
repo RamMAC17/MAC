@@ -16,7 +16,8 @@ from mac.routers import (
     models, integration, keys, quota,
     guardrails, rag, search,
     nodes, attendance, doubts, notifications,
-    scoped_keys, agent, notebooks,
+    scoped_keys, agent, notebooks, kernels,
+    notebook_ws, copy_check,
 )
 
 FRONTEND_DIR = pathlib.Path(__file__).resolve().parent.parent / "frontend"
@@ -37,6 +38,7 @@ async def lifespan(app: FastAPI):
     import mac.models.agent  # noqa: F401
     import mac.models.notebook  # noqa: F401
     import mac.models.model_submission  # noqa: F401
+    import mac.models.copy_check  # noqa: F401
 
     # Create tables (dev only — production uses Alembic)
     if settings.is_dev:
@@ -84,6 +86,9 @@ app.include_router(notifications.router, prefix="/api/v1")
 app.include_router(scoped_keys.router, prefix="/api/v1")
 app.include_router(agent.router, prefix="/api/v1")
 app.include_router(notebooks.router, prefix="/api/v1")
+app.include_router(kernels.router, prefix="/api/v1")
+app.include_router(notebook_ws.router)
+app.include_router(copy_check.router, prefix="/api/v1")
 
 # Serve frontend static files
 if FRONTEND_DIR.exists():

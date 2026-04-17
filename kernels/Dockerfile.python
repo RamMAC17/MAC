@@ -1,0 +1,140 @@
+# MAC Kernel — Python 3.11 with 80+ ML/DS/AI libraries pre-installed
+# Build: docker build -t mac-kernel-python:latest -f Dockerfile.python .
+# Usage: This image is used by the MAC kernel manager for offline notebook execution.
+
+FROM python:3.11-slim
+
+LABEL maintainer="MAC Team" \
+      description="Python notebook kernel with 80+ pre-installed libraries for offline use"
+
+# System dependencies for common Python packages
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential gcc g++ gfortran \
+    libffi-dev libssl-dev libxml2-dev libxslt1-dev \
+    libhdf5-dev libopenblas-dev liblapack-dev \
+    libjpeg-dev libpng-dev zlib1g-dev \
+    graphviz libgraphviz-dev \
+    git curl wget \
+    && rm -rf /var/lib/apt/lists/*
+
+# Core data science & ML stack
+RUN pip install --no-cache-dir \
+    numpy==1.26.4 \
+    pandas==2.2.2 \
+    scipy==1.14.1 \
+    sympy==1.13.3 \
+    statsmodels==0.14.4
+
+# Visualization
+RUN pip install --no-cache-dir \
+    matplotlib==3.9.2 \
+    seaborn==0.13.2 \
+    plotly==5.24.1 \
+    bokeh==3.5.2 \
+    altair==5.4.1 \
+    pillow==10.4.0
+
+# Machine Learning
+RUN pip install --no-cache-dir \
+    scikit-learn==1.5.2 \
+    xgboost==2.1.1 \
+    lightgbm==4.5.0 \
+    catboost==1.2.7
+
+# Deep Learning (CPU versions — GPU workers get CUDA versions)
+RUN pip install --no-cache-dir \
+    torch==2.4.1+cpu torchvision==0.19.1+cpu torchaudio==2.4.1+cpu \
+    --index-url https://download.pytorch.org/whl/cpu
+
+RUN pip install --no-cache-dir \
+    tensorflow-cpu==2.17.0 \
+    keras==3.6.0
+
+# NLP / Transformers
+RUN pip install --no-cache-dir \
+    transformers==4.46.2 \
+    tokenizers==0.20.3 \
+    datasets==3.1.0 \
+    sentencepiece==0.2.0 \
+    nltk==3.9.1 \
+    spacy==3.8.2 \
+    gensim==4.3.3
+
+# Image / Vision
+RUN pip install --no-cache-dir \
+    opencv-python-headless==4.10.0.84 \
+    scikit-image==0.24.0 \
+    imageio==2.36.0
+
+# Data processing & file I/O
+RUN pip install --no-cache-dir \
+    openpyxl==3.1.5 \
+    xlsxwriter==3.2.0 \
+    pyarrow==18.0.0 \
+    h5py==3.12.1 \
+    lxml==5.3.0 \
+    beautifulsoup4==4.12.3 \
+    pyyaml==6.0.2 \
+    toml==0.10.2 \
+    orjson==3.10.11
+
+# HTTP / API
+RUN pip install --no-cache-dir \
+    requests==2.32.3 \
+    httpx==0.28.1 \
+    aiohttp==3.11.7 \
+    fastapi==0.115.6
+
+# Databases
+RUN pip install --no-cache-dir \
+    sqlalchemy==2.0.36 \
+    psycopg2-binary==2.9.10 \
+    redis==5.2.1
+
+# Utilities
+RUN pip install --no-cache-dir \
+    tqdm==4.67.0 \
+    rich==13.9.4 \
+    click==8.1.7 \
+    pydantic==2.10.4 \
+    python-dotenv==1.0.1 \
+    cryptography==43.0.3 \
+    pytest==8.3.4
+
+# Jupyter/IPython for notebook compatibility
+RUN pip install --no-cache-dir \
+    ipython==8.29.0 \
+    ipykernel==6.29.5 \
+    nbformat==5.10.4
+
+# Additional ML/AI tools
+RUN pip install --no-cache-dir \
+    onnxruntime==1.20.0 \
+    joblib==1.4.2 \
+    optuna==4.0.0 \
+    mlflow==2.18.0 \
+    wandb==0.18.7
+
+# Math/Science
+RUN pip install --no-cache-dir \
+    networkx==3.4.2 \
+    igraph==0.11.8 \
+    shapely==2.0.6
+
+# Misc popular packages
+RUN pip install --no-cache-dir \
+    faker==33.0.0 \
+    tabulate==0.9.0 \
+    colorama==0.4.6 \
+    regex==2024.9.11
+
+# Download NLTK data (offline use)
+RUN python -c "import nltk; nltk.download('punkt'); nltk.download('punkt_tab'); nltk.download('stopwords'); nltk.download('wordnet')"
+
+WORKDIR /workspace
+
+# Non-root user for security
+RUN useradd -m -s /bin/bash coder
+USER coder
+
+CMD ["python3"]

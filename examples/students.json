@@ -1,0 +1,18 @@
+[
+  { "roll_number": "CS2301", "name": "Aarav Sharma",   "email": "aarav.sharma@college.edu",   "department": "CSE", "year": 3, "section": "A" },
+  { "roll_number": "CS2302", "name": "Priya Patel",    "email": "priya.patel@college.edu",    "department": "CSE", "year": 3, "section": "A" },
+  { "roll_number": "CS2303", "name": "Rohan Mehta",    "email": "rohan.mehta@college.edu",    "department": "CSE", "year": 3, "section": "A" },
+  { "roll_number": "CS2304", "name": "Sneha Reddy",    "email": "sneha.reddy@college.edu",    "department": "CSE", "year": 3, "section": "A" },
+  { "roll_number": "CS2305", "name": "Arjun Singh",    "email": "arjun.singh@college.edu",    "department": "CSE", "year": 3, "section": "A" },
+  { "roll_number": "CS2306", "name": "Ananya Iyer",    "email": "ananya.iyer@college.edu",    "department": "CSE", "year": 3, "section": "A" },
+  { "roll_number": "CS2307", "name": "Vikram Kumar",   "email": "vikram.kumar@college.edu",   "department": "CSE", "year": 3, "section": "B" },
+  { "roll_number": "CS2308", "name": "Pooja Nair",     "email": "pooja.nair@college.edu",     "department": "CSE", "year": 3, "section": "B" },
+  { "roll_number": "CS2309", "name": "Harsh Gupta",    "email": "harsh.gupta@college.edu",    "department": "CSE", "year": 3, "section": "B" },
+  { "roll_number": "CS2310", "name": "Divya Joshi",    "email": "divya.joshi@college.edu",    "department": "CSE", "year": 3, "section": "B" },
+  { "roll_number": "EC2301", "name": "Kavya Rao",      "email": "kavya.rao@college.edu",      "department": "ECE", "year": 3, "section": "A" },
+  { "roll_number": "EC2302", "name": "Nikhil Verma",   "email": "nikhil.verma@college.edu",   "department": "ECE", "year": 3, "section": "A" },
+  { "roll_number": "EC2303", "name": "Meera Krishnan", "email": "meera.krishnan@college.edu", "department": "ECE", "year": 3, "section": "A" },
+  { "roll_number": "EC2304", "name": "Rahul Banerjee", "email": "rahul.banerjee@college.edu", "department": "ECE", "year": 3, "section": "A" },
+  { "roll_number": "ME2301", "name": "Suresh Pillai",  "email": "suresh.pillai@college.edu",  "department": "ME",  "year": 3, "section": "A" },
+  { "roll_number": "ME2302", "name": "Lakshmi Venkat", "email": "lakshmi.venkat@college.edu", "department": "ME",  "year": 3, "section": "A" }
+]

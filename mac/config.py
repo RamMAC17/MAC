@@ -105,6 +105,13 @@ class Settings(BaseSettings):
     rate_limit_requests_per_hour: int = 100
     rate_limit_tokens_per_day: int = 50000
 
+    # ── Notebook Kernels ──────────────────────────────────
+    kernel_timeout: int = 120            # seconds per cell execution
+    kernel_max_per_node: int = 10        # concurrent kernels per worker
+    kernel_default_memory: str = "4g"    # Docker memory limit
+    kernel_default_cpus: str = "2"       # Docker CPU limit
+    kernel_image_prefix: str = "mac-kernel"  # Docker image name prefix
+
     @property
     def cors_origins(self) -> List[str]:
         return json.loads(self.mac_cors_origins)

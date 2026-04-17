@@ -1,0 +1,6 @@
+# MAC Kernel — GCC/G++ for C/C++
+FROM gcc:13-bookworm
+WORKDIR /workspace
+RUN useradd -m -s /bin/bash coder
+USER coder
+CMD ["bash"]

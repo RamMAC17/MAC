@@ -1,6 +1,7 @@
 """Guardrail endpoints — /guardrails (Phase 6)."""
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Body
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from mac.database import get_db
 from mac.schemas.guardrails import (
@@ -11,6 +12,7 @@ from mac.schemas.guardrails import (
 from mac.services import guardrail_service
 from mac.middleware.auth_middleware import get_current_user, require_admin
 from mac.models.user import User
+from mac.models.guardrail import GuardrailRule
 
 router = APIRouter(prefix="/guardrails", tags=["Guardrails"])
 
@@ -87,4 +89,61 @@ async def update_rules(
             priority=r.priority,
         ) for r in new_rules],
         total=len(new_rules),
+    )
+
+
+@router.patch("/rules/{rule_id}/toggle")
+async def toggle_rule(
+    rule_id: str,
+    admin: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    """Enable or disable a single guardrail rule (admin-only)."""
+    rule = (await db.execute(select(GuardrailRule).where(GuardrailRule.id == rule_id))).scalar_one_or_none()
+    if not rule:
+        raise HTTPException(status_code=404, detail="Rule not found")
+    rule.enabled = not rule.enabled
+    await db.commit()
+    return {"id": rule_id, "enabled": rule.enabled}
+
+
+@router.delete("/rules/{rule_id}")
+async def delete_rule(
+    rule_id: str,
+    admin: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    """Delete a guardrail rule (admin-only)."""
+    rule = (await db.execute(select(GuardrailRule).where(GuardrailRule.id == rule_id))).scalar_one_or_none()
+    if not rule:
+        raise HTTPException(status_code=404, detail="Rule not found")
+    await db.delete(rule)
+    await db.commit()
+    return {"deleted": rule_id}
+
+
+@router.post("/rules")
+async def add_rule(
+    body: dict = Body(...),
+    admin: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    """Add a single new guardrail rule (admin-only)."""
+    import uuid
+    rule = GuardrailRule(
+        id=str(uuid.uuid4()),
+        category=body.get("category", "custom"),
+        action=body.get("action", "block"),
+        pattern=body.get("pattern", ""),
+        description=body.get("description", ""),
+        enabled=body.get("enabled", True),
+        priority=body.get("priority", 100),
+    )
+    db.add(rule)
+    await db.commit()
+    await db.refresh(rule)
+    return GuardrailRuleInfo(
+        id=rule.id, category=rule.category, action=rule.action,
+        pattern=rule.pattern, description=rule.description,
+        enabled=rule.enabled, priority=rule.priority,
     )

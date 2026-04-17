@@ -1,0 +1,17 @@
+roll_number,name,email,department,year,section
+CS2301,Aarav Sharma,aarav.sharma@college.edu,CSE,3,A
+CS2302,Priya Patel,priya.patel@college.edu,CSE,3,A
+CS2303,Rohan Mehta,rohan.mehta@college.edu,CSE,3,A
+CS2304,Sneha Reddy,sneha.reddy@college.edu,CSE,3,A
+CS2305,Arjun Singh,arjun.singh@college.edu,CSE,3,A
+CS2306,Ananya Iyer,ananya.iyer@college.edu,CSE,3,A
+CS2307,Vikram Kumar,vikram.kumar@college.edu,CSE,3,B
+CS2308,Pooja Nair,pooja.nair@college.edu,CSE,3,B
+CS2309,Harsh Gupta,harsh.gupta@college.edu,CSE,3,B
+CS2310,Divya Joshi,divya.joshi@college.edu,CSE,3,B
+EC2301,Kavya Rao,kavya.rao@college.edu,ECE,3,A
+EC2302,Nikhil Verma,nikhil.verma@college.edu,ECE,3,A
+EC2303,Meera Krishnan,meera.krishnan@college.edu,ECE,3,A
+EC2304,Rahul Banerjee,rahul.banerjee@college.edu,ECE,3,A
+ME2301,Suresh Pillai,suresh.pillai@college.edu,ME,3,A
+ME2302,Lakshmi Venkat,lakshmi.venkat@college.edu,ME,3,A
