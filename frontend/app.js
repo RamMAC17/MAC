@@ -1001,6 +1001,11 @@ let currentSession = null;
 let isStreaming = false;
 let chatMode = 'ask'; // 'ask' or 'agent'
 
+function canUseAgentMode() {
+  const role = String(state.user?.role || '').toLowerCase();
+  return role === 'faculty' || role === 'admin' || role === 'teacher';
+}
+
 function chatEmptyHtml() {
   return `<div class="chat-empty">
     <div class="chat-empty-hero">
@@ -1034,6 +1039,10 @@ function bindChatChips() {
 function renderChat() {
   const el = document.getElementById('page-content');
   el.className = 'page page-chat';
+  const allowAgentMode = canUseAgentMode();
+  if (!allowAgentMode) {
+    chatMode = 'ask';
+  }
 
   const sessions = getSessions();
   el.innerHTML = `
@@ -1058,10 +1067,14 @@ function renderChat() {
             <div class="chat-input-actions">
               <div class="chat-input-left">
                 <select id="model-select" class="model-pill"><option value="auto" selected>Auto</option></select>
-                <div class="agent-toggle" id="agent-toggle">
+                ${allowAgentMode
+                  ? `<div class="agent-toggle" id="agent-toggle">
                   <span class="agent-mode-label active" data-mode="ask">Ask</span>
                   <span class="agent-mode-label" data-mode="agent">Agent</span>
-                </div>
+                </div>`
+                  : `<div class="agent-toggle" id="agent-toggle" title="Agent mode is available for faculty/admin only">
+                  <span class="agent-mode-label active" data-mode="ask">Ask</span>
+                </div>`}
               </div>
               <div class="chat-input-right">
                 <span id="chat-status" class="chat-status-text"></span>
@@ -1148,6 +1161,11 @@ function bindChat() {
   if (agentToggle) {
     agentToggle.querySelectorAll('.agent-mode-label').forEach(lbl => {
       lbl.onclick = () => {
+        if (lbl.dataset.mode === 'agent' && !canUseAgentMode()) {
+          chatMode = 'ask';
+          document.getElementById('chat-input').placeholder = 'Type a message...';
+          return;
+        }
         agentToggle.querySelectorAll('.agent-mode-label').forEach(l => l.classList.remove('active'));
         lbl.classList.add('active');
         chatMode = lbl.dataset.mode;
@@ -1235,6 +1253,10 @@ async function sendMessage() {
   if (!currentSession) newChat();
   const model = document.getElementById('model-select').value;
   currentSession.model = model;
+
+  if (chatMode === 'agent' && !canUseAgentMode()) {
+    chatMode = 'ask';
+  }
 
   // Agent mode — delegate to agent runner
   if (chatMode === 'agent') {

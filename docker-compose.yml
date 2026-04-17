@@ -135,6 +135,25 @@ services:
     networks:
       - mac-net
 
+  # ── pgAdmin — PostgreSQL admin UI (local-only by default) ──
+  pgadmin:
+    image: dpage/pgadmin4:8
+    container_name: mac-pgadmin
+    ports:
+      - "127.0.0.1:${PGADMIN_PORT:-5050}:80"
+    environment:
+      PGADMIN_DEFAULT_EMAIL: ${PGADMIN_DEFAULT_EMAIL:-admin@mbm.local}
+      PGADMIN_DEFAULT_PASSWORD: ${PGADMIN_DEFAULT_PASSWORD:-ChangeThisStrongPassword!}
+      PGADMIN_CONFIG_ENHANCED_COOKIE_PROTECTION: "True"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    volumes:
+      - pgadmin-data:/var/lib/pgadmin
+    restart: unless-stopped
+    networks:
+      - mac-net
+
   # ── Redis — Rate limiting & caching ────────────────────
   redis:
     image: redis:7-alpine
@@ -197,6 +216,7 @@ services:
 
 volumes:
   pgdata:
+  pgadmin-data:
   redisdata:
   qdrantdata:
   searxngdata:

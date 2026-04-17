@@ -202,7 +202,8 @@ async def detect_vllm_model():
 
 
 def _model_id_from_served_name(served_name: str) -> str:
-    """Map HuggingFace model name to MAC model_id."""
+    """Map HuggingFace model name to MAC model_id.
+    Falls back to served_name itself for community-submitted models."""
     mapping = {
         "Qwen/Qwen2.5-7B-Instruct-AWQ": "qwen2.5:7b",
         "Qwen/Qwen2.5-7B-Instruct": "qwen2.5:7b",
@@ -243,6 +244,91 @@ async def register_model(client: httpx.AsyncClient, node_id: str):
         print(f"[AGENT] Model registration error: {e}")
 
 
+DEPLOY_POLL_INTERVAL = int(os.environ.get("DEPLOY_POLL_INTERVAL", 60))
+
+
+async def poll_pending_deployments(client: httpx.AsyncClient, node_id: str):
+    """Poll the control node for new model deployments assigned to this worker.
+    When found, start a new vLLM instance for each pending model."""
+    try:
+        resp = await client.get(f"{API}/nodes/pending-deployments/{node_id}")
+        if resp.status_code != 200:
+            return
+
+        data = resp.json()
+        pending = data.get("pending", [])
+        if not pending:
+            return
+
+        for deploy in pending:
+            deployment_id = deploy["deployment_id"]
+            model_id = deploy["model_id"]
+            vllm_port = deploy["vllm_port"]
+            gpu_mem_util = deploy.get("gpu_memory_util", 0.85)
+            max_model_len = deploy.get("max_model_len", 8192)
+
+            print(f"[AGENT] New deployment: {model_id} on port {vllm_port}")
+
+            try:
+                # Start a new vLLM instance for this model
+                import subprocess
+                cmd = [
+                    sys.executable, "-m", "vllm.entrypoints.openai.api_server",
+                    "--model", model_id,
+                    "--port", str(vllm_port),
+                    "--gpu-memory-utilization", str(gpu_mem_util),
+                    "--max-model-len", str(max_model_len),
+                    "--host", "0.0.0.0",
+                ]
+                print(f"[AGENT] Starting vLLM: {' '.join(cmd)}")
+                # Start as a detached process
+                subprocess.Popen(
+                    cmd,
+                    stdout=open(f"/tmp/vllm_{vllm_port}.log", "w"),
+                    stderr=subprocess.STDOUT,
+                    start_new_session=True,
+                )
+
+                # Wait for the new vLLM instance to be ready
+                ready = False
+                for _ in range(120):  # 10 minutes
+                    try:
+                        check = await client.get(f"http://localhost:{vllm_port}/health")
+                        if check.status_code == 200:
+                            ready = True
+                            break
+                    except httpx.RequestError:
+                        pass
+                    await asyncio.sleep(5)
+
+                if ready:
+                    # Report success
+                    await client.post(
+                        f"{API}/nodes/deployment/{deployment_id}/status",
+                        json={"status": "ready"}
+                    )
+                    print(f"[AGENT] Deployment {model_id} ready on port {vllm_port}")
+                else:
+                    await client.post(
+                        f"{API}/nodes/deployment/{deployment_id}/status",
+                        json={"status": "failed", "error_message": "vLLM did not start in time"}
+                    )
+                    print(f"[AGENT] Deployment {model_id} FAILED — vLLM timeout")
+
+            except Exception as e:
+                print(f"[AGENT] Error deploying {model_id}: {e}")
+                try:
+                    await client.post(
+                        f"{API}/nodes/deployment/{deployment_id}/status",
+                        json={"status": "failed", "error_message": str(e)[:500]}
+                    )
+                except Exception:
+                    pass
+
+    except httpx.RequestError as e:
+        print(f"[AGENT] Deploy poll error: {e}")
+
+
 async def main():
     print(f"[AGENT] MAC Worker Agent starting — {NODE_NAME}")
     print(f"[AGENT] Control node: {CONTROL_URL}")
@@ -263,19 +349,33 @@ async def main():
         # Register model with control node
         await register_model(client, node_id)
 
-        # Heartbeat loop
+        # Combined heartbeat + deploy-poll loop
         print(f"[AGENT] Starting heartbeat loop (interval: {HEARTBEAT_INTERVAL}s)")
-        while True:
-            await heartbeat_loop(client, node_id)
+        print(f"[AGENT] Deploy poll interval: {DEPLOY_POLL_INTERVAL}s")
 
-            # If heartbeat loop exits (node not found), re-enroll
-            print("[AGENT] Heartbeat loop exited. Re-enrolling...")
-            node_id = None
-            while not node_id:
-                node_id = await enroll(client)
-                if not node_id:
-                    await asyncio.sleep(30)
-            await register_model(client, node_id)
+        heartbeat_task = asyncio.create_task(heartbeat_loop(client, node_id))
+        deploy_poll_counter = 0
+
+        while True:
+            if heartbeat_task.done():
+                # Heartbeat exited (node not found) — re-enroll
+                print("[AGENT] Heartbeat loop exited. Re-enrolling...")
+                node_id = None
+                while not node_id:
+                    node_id = await enroll(client)
+                    if not node_id:
+                        await asyncio.sleep(30)
+                await register_model(client, node_id)
+                heartbeat_task = asyncio.create_task(heartbeat_loop(client, node_id))
+                deploy_poll_counter = 0
+
+            # Poll for new deployments periodically
+            deploy_poll_counter += HEARTBEAT_INTERVAL
+            if deploy_poll_counter >= DEPLOY_POLL_INTERVAL:
+                await poll_pending_deployments(client, node_id)
+                deploy_poll_counter = 0
+
+            await asyncio.sleep(HEARTBEAT_INTERVAL)
 
 
 if __name__ == "__main__":

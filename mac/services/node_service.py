@@ -208,6 +208,19 @@ async def get_all_deployments(db: AsyncSession) -> list[NodeModelDeployment]:
     return list(result.scalars().all())
 
 
+async def get_pending_deployments_for_node(db: AsyncSession, node_id: str) -> list[NodeModelDeployment]:
+    """Get deployments assigned to a node that are still pending (worker should start serving them)."""
+    result = await db.execute(
+        select(NodeModelDeployment)
+        .where(
+            NodeModelDeployment.node_id == node_id,
+            NodeModelDeployment.status == "pending",
+        )
+        .order_by(NodeModelDeployment.created_at.asc())
+    )
+    return list(result.scalars().all())
+
+
 async def get_ready_deployment_for_model(db: AsyncSession, model_id: str) -> Optional[tuple[str, int, str]]:
     """Find the best available node for a model. Returns (ip_address, vllm_port, served_name) or None.
     Routes to least-loaded active node with a ready deployment for this model."""

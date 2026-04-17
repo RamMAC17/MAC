@@ -36,9 +36,6 @@ nginx/ssl/
 *.log
 vllm-logs*.txt
 
-# Alembic versions (auto-generated)
-alembic/versions/
-
 # Testing
 .pytest_cache/
 .coverage

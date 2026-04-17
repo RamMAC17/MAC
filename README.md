@@ -1,4 +1,597 @@
 ﻿<p align="center">
+  <img src="logo.png" alt="MAC — MBM AI Cloud" width="180">
+</p>
+
+<h1 align="center">MAC — MBM AI Cloud</h1>
+
+<p align="center">
+  <strong>Self-hosted AI inference platform.</strong><br>
+  Turn any PCs with GPUs into an AI cloud for your college — zero cloud costs.
+</p>
+
+<p align="center">
+  <img src="https://img.shields.io/badge/python-3.11+-3776AB?style=flat-square&logo=python&logoColor=white" alt="Python 3.11+">
+  <img src="https://img.shields.io/badge/FastAPI-0.115-009688?style=flat-square&logo=fastapi&logoColor=white" alt="FastAPI">
+  <img src="https://img.shields.io/badge/vLLM-GPU_Inference-FF6F00?style=flat-square" alt="vLLM">
+  <img src="https://img.shields.io/badge/Docker-Compose-2496ED?style=flat-square&logo=docker&logoColor=white" alt="Docker">
+  <img src="https://img.shields.io/badge/License-MIT-yellow?style=flat-square" alt="MIT License">
+</p>
+
+---
+
+## What is MAC?
+
+One PC with a GPU becomes an AI server. Add more PCs and they **automatically join the cluster** — MAC routes every request to the best available GPU. Students and faculty use the built-in dashboard or any OpenAI-compatible SDK.
+
+**Two deployment modes:**
+
+| Mode | PCs | For |
+|------|-----|-----|
+| **Single-PC** | 1 GPU machine | Small labs, personal use |
+| **Cluster** | 1 control node + N GPU workers | College-wide deployment |
+
+---
+
+## Table of Contents
+
+- [Quick Start — Single PC](#quick-start--single-pc)
+- [Cluster Mode — Multiple PCs](#cluster-mode--multiple-pcs)
+- [Community Model Portal](#community-model-portal)
+- [Architecture](#architecture)
+- [Models](#models)
+- [Smart Routing](#smart-routing)
+- [API Reference](#api-reference)
+- [Configuration](#configuration)
+- [GPU Memory Planning](#gpu-memory-planning)
+- [Development](#development)
+- [Tech Stack](#tech-stack)
+
+---
+
+## Quick Start — Single PC
+
+> **One machine. One command. AI running.**
+
+### Prerequisites
+
+| Tool | Version | Why |
+|------|---------|-----|
+| **NVIDIA GPU** | 12 GB+ VRAM | Runs AI models |
+| **NVIDIA Driver** | 535+ | GPU access |
+| **Docker** | 24+ | Container runtime |
+| **Docker Compose** | v2+ | Orchestration |
+| **NVIDIA Container Toolkit** | Latest | GPU inside containers |
+
+> **Windows**: Install [Docker Desktop](https://www.docker.com/products/docker-desktop/) with WSL2 backend, then install [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html) inside WSL2.
+
+### Step 1 — Clone & Configure
+
+```bash
+git clone https://github.com/23f2003700/mac.git
+cd mac
+
+cp .env.example .env
+```
+
+Open `.env` and set these two lines to random strings:
+
+```env
+JWT_SECRET_KEY=your-random-secret-here
+MAC_SECRET_KEY=your-other-random-secret
+```
+
+### Step 2 — Start
+
+```bash
+docker compose up -d
+```
+
+First run downloads models (~5–15 GB depending on model). Takes 10–15 minutes. After that, starts in seconds.
+
+### Step 3 — Use It
+
+Open **http://localhost** in your browser.
+
+| Default Account | Roll / Email | Password |
+|-----------------|-------------|----------|
+| Admin | `abhisek.cse@mbm.ac.in` | `Admin@1234` |
+| Student | `21CS045` | `Student@1234` |
+
+**Quick API test:**
+
+```bash
+# Login
+curl -X POST http://localhost/api/v1/auth/login \
+  -H "Content-Type: application/json" \
+  -d '{"roll_number": "21CS045", "password": "Student@1234"}'
+
+# Chat (use the access_token from login response)
+curl -X POST http://localhost/api/v1/query/chat \
+  -H "Authorization: Bearer YOUR_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"model": "auto", "messages": [{"role": "user", "content": "Hello!"}]}'
+```
+
+**OpenAI SDK compatible:**
+
+```python
+from openai import OpenAI
+
+client = OpenAI(
+    base_url="http://localhost/api/v1/query",
+    api_key="YOUR_API_KEY"  # Generate at /api/v1/keys/generate
+)
+
+response = client.chat.completions.create(
+    model="auto",
+    messages=[{"role": "user", "content": "Explain quicksort"}]
+)
+print(response.choices[0].message.content)
+```
+
+### What's Running
+
+| Service | Port | Purpose |
+|---------|------|---------|
+| Nginx | 80 | Dashboard + API proxy |
+| MAC API | 8000 | Auth, routing, tracking |
+| vLLM | 8001 | GPU inference |
+| PostgreSQL | 5432 | Database |
+| Redis | 6379 | Rate limiting |
+| Qdrant | 6333 | Vector DB (RAG) |
+| SearXNG | 8888 | Web search |
+
+### Stop / Restart
+
+```bash
+docker compose down          # Stop (data preserved in volumes)
+docker compose up -d         # Restart
+docker compose down -v       # Full reset (deletes all data)
+```
+
+---
+
+## Cluster Mode — Multiple PCs
+
+> **Any PC with a GPU can join the AI cloud.** One PC runs the control node (API, DB, frontend). Other PCs run vLLM and auto-connect.
+
+```
+    ┌─────────────── Control Node (PC1) ───────────────┐
+    │  MAC API · PostgreSQL · Redis · Nginx · Qdrant   │
+    │  IP: 10.10.13.30                                 │
+    └──────────────────────┬───────────────────────────┘
+                           │  Campus WiFi / LAN
+          ┌────────────────┼────────────────┐
+          │                │                │
+  ┌───────┴──────┐ ┌──────┴───────┐ ┌──────┴───────┐
+  │  Worker PC2  │ │  Worker PC3  │ │  Worker PC4  │
+  │  RTX 3060    │ │  RTX 3060    │ │  RTX 4060    │
+  │  Coder 7B    │ │  DeepSeek 7B │ │  Mistral 7B  │
+  └──────────────┘ └──────────────┘ └──────────────┘
+```
+
+**Smart routing**: Code question → PC2's Coder model. Math → PC3. General → PC1. All automatic.
+
+---
+
+### Step 1 — Control Node (PC1)
+
+The control node runs everything except vLLM. No GPU required.
+
+```bash
+git clone https://github.com/23f2003700/mac.git
+cd mac
+
+cp .env.example .env
+# Edit .env — set JWT_SECRET_KEY and MAC_SECRET_KEY
+
+# Start control node
+docker compose -f docker-compose.control-node.yml up -d
+```
+
+**Open the admin panel**: http://YOUR_IP → Login as admin → **Cluster** tab.
+
+Click **"Generate Enrollment Token"** — copy the token. Generate one per worker PC.
+
+> **Firewall**: If workers can't reach the control node, run `setup-firewall.ps1` as Administrator to open required ports.
+
+---
+
+### Step 2 — Worker PC (any PC with a GPU)
+
+#### Option A: Automated Setup (Windows — recommended)
+
+Copy `setup-worker.ps1` to the worker PC and run **as Administrator**:
+
+```powershell
+Set-ExecutionPolicy Bypass -Scope Process -Force
+.\setup-worker.ps1 -ControlNodeIP "10.10.13.30" -NodeName "pc2-coder"
+```
+
+The script handles everything:
+1. Checks NVIDIA GPU + drivers
+2. Installs WSL2 + Docker Desktop if missing
+3. Opens firewall ports
+4. Asks for enrollment token and model choice
+5. Starts vLLM + worker agent containers
+
+#### Option B: Manual Setup (any OS)
+
+```bash
+git clone https://github.com/23f2003700/mac.git
+cd mac
+```
+
+Create a `.env` file for the worker:
+
+```env
+CONTROL_NODE_URL=http://10.10.13.30:8000
+ENROLLMENT_TOKEN=mac_enroll_xxxxx
+NODE_NAME=pc2-coder
+VLLM_MODEL=Qwen/Qwen2.5-Coder-7B-Instruct-AWQ
+VLLM_PORT=8001
+GPU_MEM_UTIL=0.85
+MAX_MODEL_LEN=8192
+GPU_NAME=NVIDIA RTX 3060
+GPU_VRAM_MB=12288
+RAM_TOTAL_MB=16384
+CPU_CORES=8
+HEARTBEAT_INTERVAL=30
+```
+
+Start the worker:
+
+```bash
+docker compose -f docker-compose.worker-node.yml up -d
+```
+
+**That's it.** The worker agent will:
+1. Enroll with the control node using the token
+2. Wait for vLLM to load the model
+3. Register the model with MAC
+4. Send heartbeats every 30 seconds
+
+Check the admin panel → **Cluster** tab — the new node appears as **Active**.
+
+#### Option C: No Docker (bare metal)
+
+```bash
+# Terminal 1 — vLLM
+pip install vllm
+vllm serve Qwen/Qwen2.5-Coder-7B-Instruct-AWQ \
+  --port 8001 --gpu-memory-utilization 0.85 --max-model-len 8192
+
+# Terminal 2 — Worker agent
+pip install httpx psutil
+export CONTROL_NODE_URL=http://10.10.13.30:8000
+export ENROLLMENT_TOKEN=mac_enroll_xxxxx
+export NODE_NAME=pc2-coder
+export VLLM_PORT=8001
+export GPU_NAME="NVIDIA RTX 3060"
+export GPU_VRAM_MB=12288
+python worker-agent.py
+```
+
+---
+
+### Step 3 — Verify the Cluster
+
+```bash
+# Check cluster status
+curl http://10.10.13.30/api/v1/nodes/cluster-status \
+  -H "Authorization: Bearer ADMIN_TOKEN"
+```
+
+Or use the admin dashboard → **Cluster** tab for real-time GPU utilization and node status.
+
+---
+
+### Adding More Models
+
+1. Change `VLLM_MODEL` in the worker's `.env`
+2. Restart: `docker compose -f docker-compose.worker-node.yml up -d`
+3. The worker auto-registers the new model
+
+Or use the **Community Model Portal** to let users submit models for admin review and deployment.
+
+---
+
+## Community Model Portal
+
+Anyone can suggest a HuggingFace model. Admins review, approve, and deploy it to a worker PC.
+
+```
+User submits model  →  Admin reviews  →  Admin assigns worker  →  Worker downloads & serves  →  Model goes LIVE
+```
+
+### Submit a Model
+
+```bash
+curl -X POST http://localhost/api/v1/models/submit \
+  -H "Authorization: Bearer USER_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model_url": "mistralai/Mistral-7B-Instruct-v0.3",
+    "display_name": "Mistral 7B Instruct",
+    "description": "Fast general chat model",
+    "category": "speed",
+    "parameters": "7B",
+    "min_vram_gb": 8.0
+  }'
+```
+
+Accepted formats: HuggingFace URLs (`https://huggingface.co/org/model`), model IDs (`org/model`), GitHub URLs.
+
+### Admin — Review & Deploy
+
+```bash
+# List pending
+curl http://localhost/api/v1/models/submissions?status=submitted \
+  -H "Authorization: Bearer ADMIN_TOKEN"
+
+# Approve
+curl -X POST http://localhost/api/v1/models/submissions/{id}/review \
+  -H "Authorization: Bearer ADMIN_TOKEN" \
+  -d '{"decision": "approved", "note": "Looks good"}'
+
+# Assign to worker
+curl -X POST http://localhost/api/v1/models/submissions/{id}/assign \
+  -H "Authorization: Bearer ADMIN_TOKEN" \
+  -d '{"worker_node_id": "NODE_UUID", "vllm_port": 8002}'
+
+# Mark live
+curl -X POST http://localhost/api/v1/models/submissions/{id}/live \
+  -H "Authorization: Bearer ADMIN_TOKEN"
+```
+
+Once live, the model appears in `GET /models` and is routable via `model: "org/model-name"` in chat.
+
+### Browse Community Models
+
+```bash
+curl http://localhost/api/v1/models/community  # No auth needed
+```
+
+---
+
+## Architecture
+
+```
+  Students / Faculty / Any Device
+  (OpenAI SDK · curl · PWA Dashboard)
+                 │
+            Port 80 (HTTP)
+                 │
+          ┌──────┴──────┐
+          │    Nginx     │  Static PWA + reverse proxy
+          └──────┬──────┘
+                 │
+          ┌──────┴──────┐
+          │   MAC API    │  FastAPI — auth, smart routing,
+          │   :8000      │  quotas, guardrails, usage tracking
+          └──────┬──────┘
+                 │
+    ┌────────────┼────────────┬──────────────┐
+    │            │            │              │
+ ┌──┴───┐  ┌───┴───┐  ┌────┴────┐  ┌──────┴──────┐
+ │ vLLM │  │ vLLM  │  │ Worker  │  │   Worker    │
+ │ Local│  │ Local │  │ Node 2  │  │   Node 3    │
+ │:8001 │  │:8002  │  │ (remote)│  │  (remote)   │
+ └──────┘  └───────┘  └─────────┘  └─────────────┘
+                 │
+    ┌────────────┼──────────────┬──────────────┐
+    │            │              │              │
+ ┌──┴───┐  ┌───┴────┐  ┌─────┴─────┐  ┌────┴────┐
+ │Redis │  │Postgres│  │  Qdrant   │  │ SearXNG │
+ │:6379 │  │ :5432  │  │  :6333    │  │  :8888  │
+ │(rate)│  │ (data) │  │(RAG/vec)  │  │(search) │
+ └──────┘  └────────┘  └───────────┘  └─────────┘
+```
+
+---
+
+## Models
+
+### Built-in Chat Models
+
+| Model ID | Engine | Params | Specialty | VRAM |
+|----------|--------|--------|-----------|------|
+| `qwen2.5:7b` | Qwen2.5-7B-Instruct | 7B | General chat | ~5 GB |
+| `qwen2.5-coder:7b` | Qwen2.5-Coder-7B | 7B | Code generation | ~5 GB |
+| `deepseek-r1:14b` | DeepSeek-R1-14B | 14B | Math, reasoning | ~9 GB |
+| `gemma3:27b` | Gemma-3-27B | 27B | Complex analysis | ~18 GB |
+
+### Speech, TTS, Embedding, Vision
+
+| Model ID | Type | Params | VRAM |
+|----------|------|--------|------|
+| `whisper-small` | STT | 244M | ~1 GB |
+| `whisper-large-v3-turbo` | STT | 809M | ~4 GB |
+| `tts-piper` | TTS | ~20M | CPU only |
+| `nomic-embed-text` | Embedding | 137M | ~550 MB |
+| `moondream2` | Vision | 1.9B | ~2 GB |
+
+---
+
+## Smart Routing
+
+When `model` is `"auto"`, MAC picks the best model:
+
+| Prompt Content | Routes To |
+|----------------|-----------|
+| Code keywords (python, debug, function…) | Coder model |
+| Math keywords (equation, prove, integral…) | Reasoning model |
+| Complex analysis (explain, research, essay…) | Intelligence model |
+| General questions | Speed model |
+
+In cluster mode, requests also route to the **least-loaded GPU** across all workers.
+
+---
+
+## API Reference
+
+Base URL: `/api/v1` — Interactive docs at [`/docs`](http://localhost/docs) (Swagger) and [`/redoc`](http://localhost/redoc).
+
+### Core Endpoints
+
+| Area | Endpoint | Auth | Description |
+|------|----------|------|-------------|
+| **Auth** | `POST /auth/login` | — | Login, get JWT tokens |
+| | `POST /auth/verify` | — | Login with roll + DOB |
+| | `GET /auth/me` | JWT | User profile |
+| **Chat** | `POST /query/chat` | JWT/Key | Chat completion (streaming) |
+| | `POST /query/completions` | JWT/Key | Text completion |
+| | `POST /query/embeddings` | JWT/Key | Generate embeddings |
+| | `POST /query/speech-to-text` | JWT/Key | Audio transcription |
+| | `POST /query/text-to-speech` | JWT/Key | Text to audio |
+| **Models** | `GET /models` | — | List all models |
+| | `GET /models/community` | — | Live community models |
+| | `POST /models/submit` | JWT | Submit model for review |
+| **Keys** | `POST /keys/generate` | JWT | Create API key |
+| **Cluster** | `GET /nodes` | Admin | List worker nodes |
+| | `GET /nodes/cluster-status` | Admin | Cluster health |
+| | `POST /nodes/enrollment-token` | Admin | Generate enrollment token |
+| **RAG** | `POST /rag/ingest` | JWT | Upload documents |
+| | `POST /rag/query` | JWT | RAG-augmented query |
+| **Search** | `POST /search/web` | JWT | Web search |
+| | `POST /search/grounded` | JWT | Search + LLM answer |
+
+### Rate Limits
+
+| Role | Requests/Hour | Tokens/Day |
+|------|---------------|------------|
+| Student | 100 | 50,000 |
+| Faculty | 300 | 200,000 |
+| Admin | Unlimited | Unlimited |
+
+---
+
+## Configuration
+
+All settings via `.env`. See [.env.example](.env.example) for the full list.
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `DATABASE_URL` | `postgresql+asyncpg://…` | Database connection |
+| `JWT_SECRET_KEY` | *(must change)* | JWT signing secret |
+| `MAC_SECRET_KEY` | *(must change)* | App secret |
+| `VLLM_SPEED_URL` | `http://localhost:8001` | Speed model endpoint |
+| `VLLM_CODE_URL` | `http://localhost:8002` | Code model endpoint |
+| `VLLM_REASONING_URL` | `http://localhost:8003` | Reasoning endpoint |
+| `RATE_LIMIT_REQUESTS_PER_HOUR` | `100` | Per-user rate limit |
+| `RATE_LIMIT_TOKENS_PER_DAY` | `50000` | Per-user token limit |
+
+---
+
+## GPU Memory Planning
+
+### 12 GB GPU (RTX 3060) — one model at a time
+
+| Model | VRAM |
+|-------|------|
+| Qwen2.5-7B-AWQ | ~10 GB |
+
+### 24 GB GPU (RTX 3090 / 4090) — multiple models
+
+| Model | Allocation | VRAM |
+|-------|-----------|------|
+| Qwen2.5-7B (speed) | 0.22 | ~5.3 GB |
+| Qwen2.5-Coder-7B (code) | 0.22 | ~5.3 GB |
+| DeepSeek-R1-14B (reasoning) | 0.35 | ~8.4 GB |
+| **Total** | **0.79** | **~19 GB** |
+
+### Cluster (3× 12 GB GPUs across 3 PCs)
+
+| PC | Model | VRAM |
+|----|-------|------|
+| PC1 | Qwen2.5-7B (general) | 10 GB |
+| PC2 | Qwen2.5-Coder-7B (code) | 10 GB |
+| PC3 | DeepSeek-R1-7B (reasoning) | 10 GB |
+| **Total** | **3 specialized models** | **30 GB** |
+
+---
+
+## Development
+
+### Run Without Docker
+
+```bash
+git clone https://github.com/23f2003700/mac.git
+cd mac
+
+python -m venv venv
+source venv/bin/activate   # Windows: venv\Scripts\activate
+pip install -r requirements.txt
+
+cp .env.example .env
+# Edit .env — set DATABASE_URL, secrets
+
+# Start vLLM (separate terminal)
+vllm serve Qwen/Qwen2.5-7B-Instruct-AWQ --port 8001 --gpu-memory-utilization 0.85
+
+# Start API
+uvicorn mac.main:app --host 0.0.0.0 --port 8000 --reload
+```
+
+### Tests
+
+```bash
+DATABASE_URL=sqlite+aiosqlite:///./test.db pytest -v
+```
+
+### Project Structure
+
+```
+mac/
+├── main.py                    App entry, startup
+├── config.py                  Settings from .env
+├── database.py                SQLAlchemy async engine
+├── models/                    ORM models (user, node, agent, notebook…)
+├── routers/                   19 API route modules
+├── services/                  Business logic (LLM proxy, node mgmt…)
+├── middleware/                 Auth, rate limiting
+└── utils/                     JWT, hashing
+
+frontend/                      PWA dashboard
+worker-agent.py                Worker sidecar agent
+setup-worker.ps1               Automated Windows worker setup
+docker-compose.yml             Single-PC deployment
+docker-compose.control-node.yml  Cluster — control node
+docker-compose.worker-node.yml   Cluster — GPU worker
+```
+
+### Database Migrations
+
+```bash
+alembic revision --autogenerate -m "description"
+alembic upgrade head
+```
+
+---
+
+## Tech Stack
+
+| Layer | Technology |
+|-------|-----------|
+| LLM Runtime | vLLM (PagedAttention, continuous batching) |
+| API | FastAPI 0.115 (async) |
+| ORM | SQLAlchemy 2.0 (async) |
+| Database | PostgreSQL 16 |
+| Cache | Redis 7 |
+| Vector DB | Qdrant |
+| Search | SearXNG |
+| Auth | JWT + scoped API keys |
+| Proxy | Nginx |
+| Frontend | Vanilla JS PWA |
+| Containers | Docker Compose |
+| Migrations | Alembic |
+
+---
+
+## License
+
+MIT — MBM University, Jodhpur
+<p align="center">
   <img src="logo.png" alt="MAC — MBM AI Cloud" width="200">
 </p>
 
@@ -81,11 +674,34 @@ That's it. Docker pulls and starts all services:
 | Whisper *(optional)* | 8005 | Speech-to-text (faster-whisper) |
 | TTS *(optional)* | 8006 | Text-to-speech (Piper / OpenedAI) |
 | PostgreSQL | 5432 | Persistent database |
+| pgAdmin *(optional)* | 5050 | PostgreSQL admin UI (schema/data edit) |
 | Redis | 6379 | Rate limiting and cache |
 | Qdrant | 6333 | Vector DB for RAG |
 | SearXNG | 8888 | Self-hosted web search |
 
 First startup takes 10-15 minutes as vLLM downloads models (~15GB total). Subsequent starts are instant (models are cached).
+
+### Database Management (Recommended)
+
+For long-term operations, use both tools:
+
+- **pgAdmin UI** for day-to-day inspection and edits (tables, rows, indexes, query tool).
+- **Alembic migrations** for tracked schema changes across environments.
+
+Open pgAdmin at `http://localhost:5050` (or your `PGADMIN_PORT`), then connect to:
+
+- Host: `postgres`
+- Port: `5432`
+- Database: `mac_db`
+- Username: `mac`
+- Password: `mac_password`
+
+Set secure defaults in `.env` before production:
+
+- `PGADMIN_DEFAULT_EMAIL`
+- `PGADMIN_DEFAULT_PASSWORD`
+
+To keep schema history reproducible, commit migration files under `alembic/versions/`.
 
 ### 3. Open the Dashboard
 

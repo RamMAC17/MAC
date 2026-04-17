@@ -157,6 +157,63 @@ async def register_model(
     return {"status": "registered", "deployment_id": deployment.id}
 
 
+# ── Worker Deploy Poll (no user auth, node-id based) ────
+
+@router.get("/pending-deployments/{node_id}")
+async def pending_deployments(
+    node_id: str,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+):
+    """Worker agents poll this to discover newly assigned models to deploy.
+    Returns pending NodeModelDeployment records for this node."""
+    node = await node_service.get_node(db, node_id)
+    if not node:
+        raise HTTPException(status_code=404, detail="Node not found")
+
+    # Security: verify request comes from the enrolled node's IP
+    client_ip = request.client.host if request.client else None
+    if client_ip and node.ip_address and client_ip != node.ip_address:
+        if not (client_ip.startswith("172.") or client_ip.startswith("10.") or client_ip == "127.0.0.1"):
+            raise HTTPException(status_code=403, detail="IP mismatch")
+
+    deployments = await node_service.get_pending_deployments_for_node(db, node_id)
+    return {
+        "pending": [
+            {
+                "deployment_id": d.id,
+                "model_id": d.model_id,
+                "model_name": d.model_name,
+                "served_name": d.served_name,
+                "vllm_port": d.vllm_port,
+                "gpu_memory_util": d.gpu_memory_util,
+                "max_model_len": d.max_model_len,
+            }
+            for d in deployments
+        ]
+    }
+
+
+@router.post("/deployment/{deployment_id}/status")
+async def update_deployment_status(
+    deployment_id: str,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+):
+    """Worker agents report deployment status updates (e.g., pending → ready or failed)."""
+    body = await request.json()
+    status = body.get("status", "")
+    error_message = body.get("error_message")
+    if status not in ("ready", "failed", "removed"):
+        raise HTTPException(400, "status must be 'ready', 'failed', or 'removed'")
+
+    success = await node_service.update_deployment_status(db, deployment_id, status, error_message)
+    if not success:
+        raise HTTPException(404, "Deployment not found")
+    await db.commit()
+    return {"status": status}
+
+
 # ── Node Management (Admin) ─────────────────────────────
 
 @router.get("", response_model=NodeListResponse)

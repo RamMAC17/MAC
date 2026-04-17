@@ -22,6 +22,12 @@ import mac.models.user  # noqa: F401, E402
 import mac.models.guardrail  # noqa: F401, E402
 import mac.models.quota  # noqa: F401, E402
 import mac.models.rag  # noqa: F401, E402
+import mac.models.node  # noqa: F401, E402
+import mac.models.attendance  # noqa: F401, E402
+import mac.models.doubt  # noqa: F401, E402
+import mac.models.notification  # noqa: F401, E402
+import mac.models.agent  # noqa: F401, E402
+import mac.models.notebook  # noqa: F401, E402
 
 target_metadata = Base.metadata
 

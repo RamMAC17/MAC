@@ -304,6 +304,7 @@ async def _resolve_model_cluster(
     model_id: str, messages: list[dict] | None = None
 ) -> tuple[str, str]:
     """Cluster-aware model resolution. Tries worker nodes first, then local vLLM.
+    Also resolves live community models via model_submissions.
     Returns (served_name, base_url)."""
     if model_id == "auto":
         model_id = _smart_route(messages)
@@ -323,6 +324,9 @@ async def _resolve_model_cluster(
 
         async with async_session_factory() as db:
             result = await node_service.resolve_model_endpoint(db, model_id)
+            if not result:
+                # Also try with served_name (community models use HF model ID as served_name)
+                result = await node_service.resolve_model_endpoint(db, served_name)
             if result:
                 cluster_url, cluster_served_name = result
                 # Verify node is actually reachable (quick health check)
@@ -330,7 +334,6 @@ async def _resolve_model_cluster(
                     async with httpx.AsyncClient(timeout=3) as client:
                         resp = await client.get(f"{cluster_url}/health")
                         if resp.status_code == 200:
-                            # Use the served_name from the deployment (matches actual loaded model)
                             return cluster_served_name, cluster_url
                 except httpx.RequestError:
                     pass  # Node unreachable, fall through to local
@@ -592,6 +595,31 @@ async def list_available_models() -> list[dict]:
             "capabilities": info["capabilities"],
             "status": url_status[url],
         })
+
+    # Include live community models from worker nodes
+    try:
+        from mac.database import async_session as async_session_factory
+        from mac.services import model_submission_service as sub_svc
+
+        async with async_session_factory() as db:
+            live_models = await sub_svc.get_live_models(db)
+            for m in live_models:
+                if not any(r["friendly_id"] == m.model_id for r in results):
+                    results.append({
+                        "id": m.model_id,
+                        "name": m.display_name,
+                        "friendly_id": m.model_id,
+                        "model_type": "chat",
+                        "specialty": m.description or f"Community {m.category} model",
+                        "parameters": m.parameters or "",
+                        "category": m.category or "community",
+                        "context_length": m.context_length or 4096,
+                        "capabilities": m.capabilities or ["chat"],
+                        "status": "loaded",
+                        "source": "community",
+                    })
+    except Exception:
+        pass  # DB unavailable, skip community models
 
     return results
 
