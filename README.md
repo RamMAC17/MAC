@@ -14,7 +14,7 @@
   <img src="https://img.shields.io/badge/FastAPI-0.115-009688?style=flat-square&logo=fastapi&logoColor=white" alt="FastAPI">
   <img src="https://img.shields.io/badge/vLLM-GPU_Inference-FF6F00?style=flat-square" alt="vLLM">
   <img src="https://img.shields.io/badge/Docker-Compose-2496ED?style=flat-square&logo=docker&logoColor=white" alt="Docker">
-  <img src="https://img.shields.io/badge/License-MIT-yellow?style=flat-square" alt="MIT License">
+  <img src="https://img.shields.io/badge/License-MBM-yellow?style=flat-square" alt="MBM License">
 </p>
 
 ---
@@ -463,5 +463,5 @@ MAC/
 
 ## License
 
-MIT — MBM University, Jodhpur
+MBM University, Jodhpur
 
