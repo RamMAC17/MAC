@@ -1,6 +1,7 @@
 """Query endpoints — /query — core inference API."""
 
 import json
+import time
 import base64
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form
 from fastapi.responses import StreamingResponse
@@ -18,6 +19,7 @@ from mac.services.usage_service import log_request
 from mac.services import guardrail_service
 from mac.middleware.rate_limit import check_rate_limit
 from mac.models.user import User
+from mac.utils.security import generate_request_id
 
 router = APIRouter(prefix="/query", tags=["Query"])
 
@@ -44,7 +46,15 @@ async def chat(
             })
 
     # Streaming
+    # Streaming — log usage after stream finishes
     if body.stream:
+        _t_start = time.time()
+        _req_id = generate_request_id("mac-chat")
+        # Rough input token estimate (~4 chars per token)
+        _tokens_in = sum(len(m.content) for m in body.messages) // 4
+        _tokens_out = [0]
+        _model_used = [body.model]
+
         async def stream_gen():
             async for chunk in llm_service.chat_completion_stream(
                 model=body.model,
@@ -54,7 +64,30 @@ async def chat(
                 top_p=body.top_p,
                 stop=body.stop,
             ):
+                # Capture model name + accumulate output tokens from content
+                if chunk.startswith("data: ") and "[DONE]" not in chunk:
+                    try:
+                        d = json.loads(chunk[6:].strip())
+                        if "model" in d:
+                            _model_used[0] = d["model"]
+                        content = d.get("choices", [{}])[0].get("delta", {}).get("content", "")
+                        if content:
+                            _tokens_out[0] += max(1, len(content) // 4)
+                    except Exception:
+                        pass
                 yield chunk
+            # Log usage after stream completes (db session is still alive per FastAPI lifecycle)
+            try:
+                await log_request(
+                    db, user.id, _model_used[0], "/query/chat",
+                    tokens_in=_tokens_in,
+                    tokens_out=_tokens_out[0],
+                    latency_ms=int((time.time() - _t_start) * 1000),
+                    status_code=200,
+                    request_id=_req_id,
+                )
+            except Exception:
+                pass  # Non-critical — don't break the response
 
         return StreamingResponse(stream_gen(), media_type="text/event-stream")
 

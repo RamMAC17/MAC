@@ -363,10 +363,38 @@ input:focus,textarea:focus,select:focus{border-color:var(--input-focus);box-shad
 
 /* Quota Ring Charts */
 .quota-rings{display:flex;justify-content:center;gap:32px;padding:16px 0}
-.ring-wrap{position:relative;width:120px;height:120px}
-.ring-label{position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);text-align:center}
-.ring-label .pct{display:block;font-size:1.1rem;font-weight:800;font-family:'Courier New',monospace}
+.ring-wrap{position:relative;width:160px;height:160px}
+.ring-label{position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);text-align:center;pointer-events:none}
+.ring-label .pct{display:block;font-size:1.2rem;font-weight:800;font-family:'Courier New',monospace;color:var(--fg)}
 .ring-label .lbl{display:block;font-size:.6rem;text-transform:uppercase;letter-spacing:.08em;color:var(--muted)}
+.ring-label .ring-used{display:block;font-size:.7rem;font-weight:600;color:var(--muted);margin-top:2px;font-family:'Courier New',monospace}
+
+/* Model type tag in Available Models grid */
+.model-type-tag{font-size:.65rem;padding:2px 6px;border-radius:20px;background:var(--accent-light);color:var(--accent);font-weight:600;display:inline-block;margin:2px 0}
+
+/* Dark theme: ensure data-table text stays readable */
+[data-theme="dark"] .data-table th,[data-theme="dark"] .data-table td{color:var(--fg)}
+[data-theme="dark"] .stat-card .value{color:var(--fg)}
+[data-theme="dark"] .chart-card{background:var(--card)}
+[data-theme="dark"] .hm-month{color:var(--muted)}
+[data-theme="dark"] .heatmap-labels span{color:var(--muted)}
+[data-theme="dark"] .model-card{background:var(--card);border-color:var(--border)}
+[data-theme="dark"] .model-name{color:var(--fg)}
+[data-theme="dark"] .model-status.online{color:var(--success)}
+[data-theme="dark"] .model-status.offline{color:var(--muted)}
+[data-theme="dark"] .ring-label .pct{color:var(--fg)}
+[data-theme="dark"] .cc-session-card{background:var(--card);border-color:var(--border)}
+[data-theme="dark"] .attd-admin-session-card{background:var(--card);border-color:var(--border)}
+[data-theme="dark"] .doubt-card{background:var(--card);border-color:var(--border)}
+[data-theme="dark"] .stat-card{background:var(--card);border-color:var(--border)}
+[data-theme="dark"] .stat-body .label{color:var(--muted)}
+[data-theme="dark"] .stat-bar{background:var(--border)}
+[data-theme="dark"] .badge{color:var(--fg)}
+[data-theme="dark"] .admin-header h2,[data-theme="dark"] .dash-greeting h2{color:var(--fg)}
+[data-theme="dark"] .form-input,[data-theme="dark"] input,[data-theme="dark"] select,[data-theme="dark"] textarea{background:var(--input-bg);color:var(--fg);border-color:var(--input-border)}
+[data-theme="dark"] .modal{background:var(--card);color:var(--fg)}
+[data-theme="dark"] .modal h3{color:var(--fg)}
+[data-theme="dark"] code{color:var(--fg);background:var(--code-bg)}
 
 /* ═══════════════════════════════════════════════════════════
    HEATMAP — GitHub-style contribution graph

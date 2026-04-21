@@ -182,7 +182,10 @@ function render() {
     _dashRefreshIv = setInterval(() => { if (state.page === 'dashboard') renderDashboard(); }, 30000);
   }
   else if (state.page === 'chat') renderChat();
-  else if (state.page === 'notebooks') renderNotebooks();
+  else if (state.page === 'notebooks') {
+    if ((state.user?.role || 'student') !== 'admin') { navigate('dashboard'); return; }
+    renderNotebooks();
+  }
   else if (state.page === 'admin') renderAdmin();
   else if (state.page === 'settings') renderSettings();
   else if (state.page === 'doubts') renderDoubts();
@@ -392,10 +395,10 @@ function shell() {
             <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
             <span>Chat</span>
           </a>
-          <a href="#notebooks" data-page="notebooks" class="${state.page==='notebooks'?'active':''}">
+          ${isAdmin ? `<a href="#notebooks" data-page="notebooks" class="${state.page==='notebooks'?'active':''}">
             <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z"/><path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z"/></svg>
             <span>Notebooks</span>
-          </a>
+          </a>` : ''}
           <a href="#doubts" data-page="doubts" class="${state.page==='doubts'?'active':''}">
             <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
             <span>Doubts</span>
@@ -749,12 +752,12 @@ async function renderDashboard() {
           </div>
           <div class="quota-rings">
             <div class="ring-wrap">
-              <canvas id="chart-tokens" width="120" height="120"></canvas>
-              <div class="ring-label"><span class="pct">${tokenPct}%</span><span class="lbl">Tokens</span></div>
+              <canvas id="chart-tokens" width="160" height="160"></canvas>
+              <div class="ring-label"><span class="pct">${tokenPct}%</span><span class="lbl">Tokens</span><span class="ring-used">${fmtNum(tokensUsed)}</span></div>
             </div>
             <div class="ring-wrap">
-              <canvas id="chart-reqs" width="120" height="120"></canvas>
-              <div class="ring-label"><span class="pct">${reqPct}%</span><span class="lbl">Requests</span></div>
+              <canvas id="chart-reqs" width="160" height="160"></canvas>
+              <div class="ring-label"><span class="pct">${reqPct}%</span><span class="lbl">Requests</span><span class="ring-used">${reqsUsed}</span></div>
             </div>
           </div>
         </div>
@@ -798,17 +801,24 @@ async function renderDashboard() {
     renderHeatmap('heatmap-container', heatmapData);
 
     // Donut charts
-    makeDonut('chart-tokens', tokensUsed, tokensLimit, '#000');
-    makeDonut('chart-reqs', reqsUsed, reqsLimit, '#000');
+    makeDonut('chart-tokens', tokensUsed, tokensLimit);
+    makeDonut('chart-reqs', reqsUsed, reqsLimit);
 
     // Model distribution chart
     const modelLabels = Object.keys(modelDist);
     const modelValues = Object.values(modelDist);
-    const modelColors = ['#111', '#555', '#999', '#bbb', '#ddd'];
+    const cs0 = getComputedStyle(document.documentElement);
+    const isDarkTheme = document.documentElement.getAttribute('data-theme') === 'dark';
+    const accentCol = cs0.getPropertyValue('--accent').trim() || '#7c6ff7';
+    const fgCol = cs0.getPropertyValue('--fg').trim() || '#111';
+    const mutedCol = cs0.getPropertyValue('--muted').trim() || '#888';
+    const modelColors = isDarkTheme
+      ? [accentCol, '#9b8fff', '#c4baff', '#6b5ce6', '#d4d0ff']
+      : ['#111', '#555', '#999', '#bbb', '#ddd'];
     if (modelLabels.length > 0) {
       new Chart(document.getElementById('chart-models'), {
         type: 'doughnut',
-        data: { labels: modelLabels.map(shortModel), datasets: [{ data: modelValues, backgroundColor: modelColors.slice(0, modelLabels.length), borderWidth: 2, borderColor: '#fff', cutout: '68%', hoverOffset: 8 }] },
+        data: { labels: modelLabels.map(shortModel), datasets: [{ data: modelValues, backgroundColor: modelColors.slice(0, modelLabels.length), borderWidth: 2, borderColor: cs0.getPropertyValue('--card').trim() || '#fff', cutout: '68%', hoverOffset: 8 }] },
         options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { display: false }, tooltip: { backgroundColor: '#000', titleColor: '#fff', bodyColor: '#fff', cornerRadius: 8, padding: 10 } } },
       });
       document.getElementById('model-legend').innerHTML = modelLabels.map((m, i) =>
@@ -819,8 +829,8 @@ async function renderDashboard() {
     // Hourly area chart with gradient
     const hourlyCtx = document.getElementById('chart-hourly').getContext('2d');
     const hourlyGrad = hourlyCtx.createLinearGradient(0, 0, 0, 180);
-    hourlyGrad.addColorStop(0, 'rgba(0,0,0,0.18)');
-    hourlyGrad.addColorStop(1, 'rgba(0,0,0,0.01)');
+    hourlyGrad.addColorStop(0, isDarkTheme ? 'rgba(124,111,247,0.35)' : 'rgba(0,0,0,0.18)');
+    hourlyGrad.addColorStop(1, isDarkTheme ? 'rgba(124,111,247,0.03)' : 'rgba(0,0,0,0.01)');
     new Chart(hourlyCtx.canvas, {
       type: 'line',
       data: {
@@ -829,10 +839,10 @@ async function renderDashboard() {
           data: hourlyDist,
           fill: true,
           backgroundColor: hourlyGrad,
-          borderColor: '#000',
+          borderColor: accentCol,
           borderWidth: 2,
-          pointBackgroundColor: '#000',
-          pointBorderColor: '#fff',
+          pointBackgroundColor: accentCol,
+          pointBorderColor: cs0.getPropertyValue('--card').trim() || '#fff',
           pointBorderWidth: 2,
           pointRadius: hourlyDist.map(v => v > 0 ? 4 : 0),
           pointHoverRadius: 6,
@@ -850,8 +860,8 @@ async function renderDashboard() {
           }
         },
         scales: {
-          y: { display: true, beginAtZero: true, grid: { color: 'rgba(0,0,0,0.04)' }, ticks: { font: { size: 10 }, stepSize: 1, precision: 0 } },
-          x: { grid: { display: false }, ticks: { font: { size: 9 }, maxRotation: 0 } }
+          y: { display: true, beginAtZero: true, grid: { color: isDarkTheme ? 'rgba(255,255,255,0.06)' : 'rgba(0,0,0,0.04)' }, ticks: { color: mutedCol, font: { size: 10 }, stepSize: 1, precision: 0 } },
+          x: { grid: { display: false }, ticks: { color: mutedCol, font: { size: 9 }, maxRotation: 0 } }
         },
         interaction: { intersect: false, mode: 'index' },
       },
@@ -861,9 +871,11 @@ async function renderDashboard() {
     try {
       const m = await apiJson('/models');
       const list = m.models || [];
+      const typeLabel = { chat: 'LLM · Chat', stt: 'Speech → Text', tts: 'Text → Speech', embedding: 'Embeddings', vision: 'Vision' };
       document.getElementById('models-grid').innerHTML = list.map(md => `
         <div class="model-card">
           <div class="model-name">${esc(md.id || md.name)}</div>
+          <div class="model-type-tag">${esc(typeLabel[md.model_type] || md.model_type || 'Model')}</div>
           <div class="model-status ${md.status === 'loaded' ? 'online' : 'offline'}">${md.status === 'loaded' ? '<span class="status-dot on"></span> Online' : '<span class="status-dot off"></span> Offline'}</div>
         </div>
       `).join('') || '<p class="muted">No models configured</p>';
@@ -2779,6 +2791,7 @@ function showFaceCaptureModal(mode, sessionId, sessionTitle) {
   let livenessIv = null;
   let capturedDataUrl = null;
   let videoReady = false;
+  let cancelled = false;  // guard against cancel during camera init
 
   function setCheck(el, status) {
     const icon = el.querySelector('.lc-icon');
@@ -2790,6 +2803,7 @@ function showFaceCaptureModal(mode, sessionId, sessionTitle) {
   // Start camera
   navigator.mediaDevices.getUserMedia({ video: { facingMode: 'user', width: { ideal: 640 }, height: { ideal: 480 } }, audio: false })
     .then(stream => {
+      if (cancelled) { stream.getTracks().forEach(t => t.stop()); return; }
       _attdCameraStream = stream;
       video.srcObject = stream;
       video.onloadedmetadata = () => {
@@ -2924,6 +2938,7 @@ function showFaceCaptureModal(mode, sessionId, sessionTitle) {
     setCheck(lcFace, 'pending'); setCheck(lcEyes, 'pending'); setCheck(lcStill, 'pending');
     navigator.mediaDevices.getUserMedia({ video: { facingMode: 'user', width: { ideal: 640 }, height: { ideal: 480 } }, audio: false })
       .then(stream => {
+        if (cancelled) { stream.getTracks().forEach(t => t.stop()); return; }
         _attdCameraStream = stream;
         video.srcObject = stream;
         videoReady = true;
@@ -2965,8 +2980,8 @@ function showFaceCaptureModal(mode, sessionId, sessionTitle) {
     }
   };
 
-  overlay.querySelector('#face-cancel').onclick = () => { if (livenessIv) clearInterval(livenessIv); _stopAttdCamera(); overlay.remove(); };
-  overlay.onclick = (e) => { if (e.target === overlay) { if (livenessIv) clearInterval(livenessIv); _stopAttdCamera(); overlay.remove(); } };
+  overlay.querySelector('#face-cancel').onclick = () => { cancelled = true; if (livenessIv) clearInterval(livenessIv); _stopAttdCamera(); overlay.remove(); };
+  overlay.onclick = (e) => { if (e.target === overlay) { cancelled = true; if (livenessIv) clearInterval(livenessIv); _stopAttdCamera(); overlay.remove(); } };
 }
 
 function showToast(message, type) {
@@ -4345,11 +4360,14 @@ function makeDonut(id, used, total, color) {
   const canvas = document.getElementById(id);
   if (!canvas) return;
   const remaining = Math.max(0, total - used);
+  const cs = getComputedStyle(document.documentElement);
+  const accentColor = color || cs.getPropertyValue('--accent').trim() || '#7c6ff7';
+  const trackColor = cs.getPropertyValue('--border').trim() || '#e5e5e5';
   new Chart(canvas, {
     type: 'doughnut',
     data: {
       labels: ['Used', 'Remaining'],
-      datasets: [{ data: [used, remaining], backgroundColor: [color || '#000', '#eee'], borderWidth: 0, cutout: '75%' }],
+      datasets: [{ data: [used, remaining], backgroundColor: [accentColor, trackColor], borderWidth: 0, cutout: '75%' }],
     },
     options: {
       responsive: false,
@@ -4357,7 +4375,7 @@ function makeDonut(id, used, total, color) {
         legend: { display: false },
         tooltip: {
           enabled: true,
-          backgroundColor: 'rgba(0, 0, 0, 0.75)',
+          backgroundColor: 'rgba(0,0,0,0.82)',
           titleColor: '#fff',
           bodyColor: '#ddd',
           borderColor: 'rgba(255,255,255,0.15)',
@@ -4365,6 +4383,7 @@ function makeDonut(id, used, total, color) {
           cornerRadius: 8,
           padding: 10,
           boxPadding: 4,
+          position: 'nearest',
           callbacks: {
             label: (ctx) => ' ' + ctx.label + ': ' + fmtNum(ctx.raw),
           }
