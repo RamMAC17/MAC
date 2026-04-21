@@ -1016,8 +1016,10 @@ async function renderSettings() {
           <code id="api-key-display">${esc(u.api_key || 'N/A')}</code>
           <button class="btn btn-sm btn-outline copy-btn" onclick="navigator.clipboard.writeText(document.getElementById('api-key-display').textContent).then(()=>{this.textContent='Copied!';setTimeout(()=>this.textContent='Copy',1500)})">Copy</button>
         </div>
-        <div style="margin-top:12px">
+        <div style="margin-top:12px;display:flex;gap:8px;align-items:center;flex-wrap:wrap">
           <button class="btn btn-sm btn-danger-outline" id="regen-my-key">Regenerate Key</button>
+          <button class="btn btn-sm btn-outline" id="test-key-btn">Test Key</button>
+          <span id="key-test-msg" style="font-size:.85rem"></span>
         </div>
       </div>
     </div>`;
@@ -1079,6 +1081,25 @@ async function renderSettings() {
       document.getElementById('api-key-display').textContent = r.api_key || r.key || 'Generated';
       state.user = await apiJson('/auth/me');
     } catch (ex) { alert('Failed: ' + ex.message); }
+  };
+
+  const testKeyBtn = document.getElementById('test-key-btn');
+  if (testKeyBtn) testKeyBtn.onclick = async () => {
+    const key = document.getElementById('api-key-display').textContent.trim();
+    const msg = document.getElementById('key-test-msg');
+    if (!key || key === 'N/A') { msg.innerHTML = '<span style="color:var(--danger)">No key found</span>'; return; }
+    msg.textContent = 'Testing...';
+    try {
+      const r = await fetch('/api/v1/auth/me', { headers: { 'Authorization': `Bearer ${key}` } });
+      const d = await r.json();
+      if (r.ok) {
+        msg.innerHTML = `<span style="color:var(--success)">✓ Works — authenticated as ${esc(d.name)} (${esc(d.role)})</span>`;
+      } else {
+        msg.innerHTML = `<span style="color:var(--danger)">✗ ${esc(d.detail?.message || d.detail || 'Key rejected')}</span>`;
+      }
+    } catch (ex) {
+      msg.innerHTML = `<span style="color:var(--danger)">✗ Network error: ${esc(ex.message)}</span>`;
+    }
   };
 }
 
@@ -1144,7 +1165,10 @@ function renderChat() {
             <div class="chat-input-actions">
               <div class="chat-input-left">
                 <select id="model-select" class="model-pill"><option value="auto" selected>Auto</option></select>
-
+                <button class="chat-btn-icon" id="stt-btn" title="Upload audio to transcribe (Whisper STT)">
+                  <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="23"/><line x1="8" y1="23" x2="16" y2="23"/></svg>
+                </button>
+                <input type="file" id="stt-file" accept="audio/*,.mp3,.wav,.ogg,.m4a,.webm" style="display:none">
               </div>
               <div class="chat-input-right">
                 <span id="chat-status" class="chat-status-text"></span>
@@ -1177,6 +1201,53 @@ function bindChat() {
   const input = document.getElementById('chat-input');
   input.onkeydown = (e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendMessage(); } };
   input.oninput = () => { input.style.height = 'auto'; input.style.height = Math.min(input.scrollHeight, 120) + 'px'; };
+
+  // STT: upload audio file → transcribe via Whisper
+  const sttBtn = document.getElementById('stt-btn');
+  const sttFile = document.getElementById('stt-file');
+  if (sttBtn && sttFile) {
+    sttBtn.onclick = () => sttFile.click();
+    sttFile.onchange = async (e) => {
+      const file = e.target.files[0];
+      if (!file) return;
+      sttFile.value = '';
+      const fd = new FormData();
+      fd.append('audio', file);
+      const status = document.getElementById('chat-status');
+      status.textContent = 'Transcribing...';
+      sttBtn.disabled = true;
+      try {
+        const res = await fetch('/api/v1/query/speech-to-text', {
+          method: 'POST',
+          headers: { 'Authorization': `Bearer ${state.token}` },
+          body: fd,
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.detail?.message || data.detail || 'Transcription failed');
+        const inp = document.getElementById('chat-input');
+        inp.value = (inp.value ? inp.value + ' ' : '') + data.text;
+        inp.style.height = 'auto';
+        inp.style.height = Math.min(inp.scrollHeight, 120) + 'px';
+        inp.focus();
+        status.textContent = '';
+      } catch (err) {
+        status.textContent = 'STT: ' + err.message;
+        setTimeout(() => { const s = document.getElementById('chat-status'); if (s) s.textContent = ''; }, 4000);
+      }
+      sttBtn.disabled = false;
+    };
+  }
+
+  // TTS: speaker button on assistant messages (event delegation)
+  document.getElementById('chat-messages').addEventListener('click', async (e) => {
+    const btn = e.target.closest('.tts-btn');
+    if (!btn) return;
+    const msgEl = btn.closest('[data-msg-index]');
+    if (!msgEl || !currentSession) return;
+    const idx = parseInt(msgEl.dataset.msgIndex);
+    const text = currentSession.messages[idx]?.content;
+    if (text) await playTTS(text, btn);
+  });
   document.getElementById('session-list').onclick = (e) => {
     const del = e.target.closest('[data-del]');
     if (del) { deleteSession(del.dataset.del); return; }
@@ -1284,9 +1355,12 @@ function loadSession(id) {
     msgs.innerHTML = chatEmptyHtml();
     startTypewriter();
   } else {
-    msgs.innerHTML = s.messages.map(m =>
-      `<div class="msg msg-${m.role}">${m.role === 'assistant' ? formatMd(m.content) : esc(m.content)}</div>`
-    ).join('');
+    msgs.innerHTML = s.messages.map((m, i) => {
+      if (m.role === 'assistant') {
+        return `<div class="msg msg-assistant" data-msg-index="${i}">${formatMd(m.content)}<div class="msg-meta"><button class="tts-btn" title="Listen to this response"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><path d="M15.54 8.46a5 5 0 0 1 0 7.07"/></svg></button></div></div>`;
+      }
+      return `<div class="msg msg-user">${esc(m.content)}</div>`;
+    }).join('');
     msgs.scrollTop = msgs.scrollHeight;
   }
   if (s.model) document.getElementById('model-select').value = s.model;
@@ -1366,7 +1440,9 @@ async function sendMessage() {
       currentSession.messages.push({ role: 'assistant', content: fullContent });
       persistSession();
       const usedModel = model === 'auto' ? 'Qwen2.5-7B-AWQ' : shortModel(model);
-      assistantDiv.innerHTML = formatMd(fullContent) + `<div class="msg-model-tag">answered by ${esc(usedModel)}</div>`;
+      const msgIdx = currentSession.messages.length - 1;
+      assistantDiv.dataset.msgIndex = msgIdx;
+      assistantDiv.innerHTML = formatMd(fullContent) + `<div class="msg-meta"><div class="msg-model-tag">answered by ${esc(usedModel)}</div><button class="tts-btn" title="Listen to this response"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><path d="M15.54 8.46a5 5 0 0 1 0 7.07"/></svg></button></div>`;
     } else if (streamError) {
       throw streamError;
     } else {
@@ -1393,6 +1469,39 @@ function persistSession() {
   const idx = sessions.findIndex(s => s.id === currentSession.id);
   if (idx >= 0) sessions[idx] = currentSession; else sessions.unshift(currentSession);
   saveSessions(sessions);
+}
+
+/* Text-to-Speech: play an assistant message via piper TTS */
+async function playTTS(text, btn) {
+  if (!btn || btn._ttsPlaying) return;
+  btn._ttsPlaying = true;
+  const origHTML = btn.innerHTML;
+  btn.innerHTML = '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="10 15 15 12 10 9 10 15"/></svg>';
+  btn.title = 'Generating audio...';
+  try {
+    const res = await api('/query/text-to-speech', {
+      method: 'POST',
+      body: JSON.stringify({ text: text.slice(0, 4000), voice: 'default', speed: 1.0, response_format: 'mp3' }),
+    });
+    if (!res.ok) {
+      const d = await res.json().catch(() => ({}));
+      throw new Error(d.detail?.message || 'TTS unavailable');
+    }
+    const blob = await res.blob();
+    const url = URL.createObjectURL(blob);
+    const audio = new Audio(url);
+    btn.innerHTML = '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="6" y="4" width="4" height="16"/><rect x="14" y="4" width="4" height="16"/></svg>';
+    btn.title = 'Playing... (click to stop)';
+    btn.onclick = (e) => { e.stopPropagation(); audio.pause(); };
+    audio.onended = () => { btn.innerHTML = origHTML; btn.title = 'Listen to this response'; btn._ttsPlaying = false; URL.revokeObjectURL(url); btn.onclick = null; };
+    audio.onerror = () => { btn.innerHTML = origHTML; btn.title = 'Listen to this response'; btn._ttsPlaying = false; URL.revokeObjectURL(url); btn.onclick = null; };
+    await audio.play();
+  } catch (err) {
+    btn.innerHTML = origHTML;
+    btn.title = err.message || 'TTS failed';
+    btn._ttsPlaying = false;
+    setTimeout(() => { if (btn) btn.title = 'Listen to this response'; }, 3000);
+  }
 }
 
 /* ═══════════════════════════════════════════════════════════
@@ -3355,8 +3464,11 @@ function showNewCCSessionModal() {
       fd.append('syllabus_text', document.getElementById('cc-syllabus').value.trim());
       const res = await api('/copy-check/sessions', { method: 'POST', body: fd });
       if (!res.ok) {
-        const d = await res.json();
-        document.getElementById('cc-modal-err').textContent = d.detail || 'Failed to create session.';
+        const d = await res.json().catch(() => ({}));
+        const errMsg = Array.isArray(d.detail)
+          ? d.detail.map(e => e.msg || JSON.stringify(e)).join('; ')
+          : (typeof d.detail === 'string' ? d.detail : (d.detail?.message || JSON.stringify(d.detail || 'Failed')));
+        document.getElementById('cc-modal-err').textContent = errMsg || 'Failed to create session.';
         document.getElementById('cc-modal-err').style.display = 'block';
         return false;
       }
