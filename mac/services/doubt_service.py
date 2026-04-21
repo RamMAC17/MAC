@@ -58,6 +58,7 @@ async def list_doubts_for_student(
     )).scalar() or 0
     result = await db.execute(
         select(Doubt)
+        .options(selectinload(Doubt.replies))
         .where(Doubt.student_id == student_id)
         .order_by(Doubt.created_at.desc())
         .offset((page - 1) * per_page)
@@ -78,8 +79,7 @@ async def list_doubts_for_faculty(
         select(func.count(Doubt.id)).where(conditions)
     )).scalar() or 0
     result = await db.execute(
-        select(Doubt)
-        .where(conditions)
+        select(Doubt)        .options(selectinload(Doubt.replies))        .where(conditions)
         .order_by(Doubt.created_at.desc())
         .offset((page - 1) * per_page)
         .limit(per_page)
@@ -103,7 +103,8 @@ async def list_all_doubts(
 
     count = (await db.execute(count_query)).scalar() or 0
     result = await db.execute(
-        query.order_by(Doubt.created_at.desc())
+        query.options(selectinload(Doubt.replies))
+        .order_by(Doubt.created_at.desc())
         .offset((page - 1) * per_page)
         .limit(per_page)
     )

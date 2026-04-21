@@ -3038,6 +3038,7 @@ async function renderFacultyAttendance(el) {
             </div>
           </div>
           <button class="btn btn-sm btn-primary" id="new-attd-btn" style="width:auto;padding:8px 16px;align-self:flex-start">+ New Session</button>
+          <a class="btn btn-sm btn-outline" href="/api/v1/attendance/summary/csv" title="Download attendance summary as CSV" style="width:auto;padding:8px 14px;align-self:flex-start">⬇ Summary CSV</a>
         </div>
 
         <!-- Sessions list -->
@@ -3055,6 +3056,8 @@ async function renderFacultyAttendance(el) {
                 <div class="attd-admin-session-actions">
                   <span class="attd-admin-count">${s.record_count} present</span>
                   ${s.avg_confidence != null ? `<span class="attd-conf-badge">${s.avg_confidence}% avg</span>` : ''}
+                  <a class="btn btn-sm btn-outline" href="/api/v1/attendance/sessions/${s.id}/report/csv" title="Download CSV" style="padding:3px 8px;font-size:.75rem">⬇ CSV</a>
+                  <a class="btn btn-sm btn-outline" href="/api/v1/attendance/sessions/${s.id}/report/pdf" title="Download PDF" style="padding:3px 8px;font-size:.75rem">⬇ PDF</a>
                   ${s.is_open ? `<button class="btn btn-sm btn-outline attd-close-btn" data-id="${s.id}">Close Session</button>` : ''}
                   <button class="btn btn-sm btn-outline attd-expand-btn" data-id="${s.id}">${s.record_count > 0 ? 'View Students ▾' : 'No Records'}</button>
                 </div>

@@ -267,6 +267,7 @@ async def get_session_report(db: AsyncSession, session_id: str) -> dict:
             "department": user.department if user else None,
             "face_match_confidence": r.face_match_confidence,
             "face_verified": r.face_verified,
+            "ip_address": r.ip_address,
             "marked_at": r.marked_at.isoformat(),
         })
 

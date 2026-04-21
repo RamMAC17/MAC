@@ -36,6 +36,13 @@ async def get_db() -> AsyncSession:
 
 
 async def init_db():
-    """Create all tables (dev only — production uses Alembic)."""
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
+    """Create all tables (dev only — production uses Alembic).
+    Uses checkfirst=True per-table to avoid race condition with multiple workers.
+    """
+    import sqlalchemy.exc
+    try:
+        async with engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all, checkfirst=True)
+    except sqlalchemy.exc.IntegrityError:
+        # Another worker already created tables concurrently — that's fine
+        pass

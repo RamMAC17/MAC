@@ -1,8 +1,11 @@
 """Attendance router — face registration, session management, attendance marking."""
 
+import csv
+import io
 from datetime import date, datetime, timezone, timedelta
 from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException, Request, Query
+from fastapi.responses import StreamingResponse
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from mac.database import get_db
@@ -267,6 +270,134 @@ async def session_report(
     if not report:
         raise HTTPException(status_code=404, detail="Session not found")
     return report
+
+
+@router.get("/sessions/{session_id}/report/csv")
+async def session_report_csv(
+    session_id: str,
+    user: User = Depends(_require_faculty_or_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    """Download session attendance report as CSV."""
+    report = await attendance_service.get_session_report(db, session_id)
+    if not report:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    output = io.StringIO()
+    writer = csv.writer(output)
+    sess = report["session"]
+    writer.writerow(["MAC — MBM AI Cloud | Attendance Report"])
+    writer.writerow([f"Subject: {sess.get('title','')} | Dept: {sess.get('department','')} | Date: {sess.get('session_date','')}"])
+    writer.writerow([])
+    writer.writerow(["#", "Roll Number", "Name", "Department", "Face Verified", "Confidence %", "Time", "IP Address"])
+    for i, r in enumerate(report["records"], 1):
+        writer.writerow([
+            i,
+            r.get("roll_number", ""),
+            r.get("student_name", ""),
+            r.get("department", ""),
+            "Yes" if r.get("face_verified") else "No",
+            f"{r.get('face_match_confidence', 0) * 100:.1f}",
+            r.get("marked_at", ""),
+            r.get("ip_address", ""),
+        ])
+    writer.writerow([])
+    writer.writerow(["Total Present:", report["total_present"]])
+
+    filename = f"attendance_{sess.get('session_date','')}.csv"
+    output.seek(0)
+    return StreamingResponse(
+        iter([output.getvalue()]),
+        media_type="text/csv",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+@router.get("/sessions/{session_id}/report/pdf")
+async def session_report_pdf(
+    session_id: str,
+    user: User = Depends(_require_faculty_or_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    """Download session attendance report as PDF."""
+    from fpdf import FPDF
+    report = await attendance_service.get_session_report(db, session_id)
+    if not report:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    sess = report["session"]
+    records = report["records"]
+
+    pdf = FPDF()
+    pdf.set_auto_page_break(auto=True, margin=15)
+    pdf.add_page()
+    pdf.set_font("Helvetica", "B", 16)
+    pdf.cell(0, 10, "MAC - MBM AI Cloud | Attendance Report", ln=True, align="C")
+    pdf.set_font("Helvetica", "", 11)
+    pdf.cell(0, 7, f"Subject: {sess.get('title', '')}  |  Dept: {sess.get('department', '')}  |  Date: {sess.get('session_date', '')}", ln=True, align="C")
+    pdf.cell(0, 7, f"Total Present: {report['total_present']}", ln=True, align="C")
+    pdf.ln(4)
+
+    # Table header
+    pdf.set_fill_color(230, 110, 50)
+    pdf.set_text_color(255, 255, 255)
+    pdf.set_font("Helvetica", "B", 9)
+    col_w = [8, 28, 50, 22, 18, 22, 38]
+    headers = ["#", "Roll No", "Name", "Dept", "Face", "Conf%", "Time"]
+    for w, h in zip(col_w, headers):
+        pdf.cell(w, 7, h, border=1, fill=True)
+    pdf.ln()
+
+    pdf.set_text_color(0, 0, 0)
+    pdf.set_font("Helvetica", "", 8)
+    for i, r in enumerate(records, 1):
+        fill = i % 2 == 0
+        if fill:
+            pdf.set_fill_color(245, 245, 245)
+        pdf.cell(col_w[0], 6, str(i), border=1, fill=fill)
+        pdf.cell(col_w[1], 6, str(r.get("roll_number", ""))[:16], border=1, fill=fill)
+        pdf.cell(col_w[2], 6, str(r.get("student_name", ""))[:28], border=1, fill=fill)
+        pdf.cell(col_w[3], 6, str(r.get("department", ""))[:10], border=1, fill=fill)
+        pdf.cell(col_w[4], 6, "Yes" if r.get("face_verified") else "No", border=1, fill=fill)
+        pdf.cell(col_w[5], 6, f"{r.get('face_match_confidence', 0) * 100:.1f}%", border=1, fill=fill)
+        t = r.get("marked_at", "")[:16].replace("T", " ")
+        pdf.cell(col_w[6], 6, t, border=1, fill=fill)
+        pdf.ln()
+
+    filename = f"attendance_{sess.get('session_date', '')}.pdf"
+    pdf_bytes = pdf.output()
+    return StreamingResponse(
+        iter([bytes(pdf_bytes)]),
+        media_type="application/pdf",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+@router.get("/summary/csv")
+async def attendance_summary_csv(
+    department: Optional[str] = None,
+    user: User = Depends(_require_faculty_or_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    """Download student attendance summary as CSV."""
+    summaries = await attendance_service.get_student_summary(db, department=department)
+    output = io.StringIO()
+    writer = csv.writer(output)
+    writer.writerow(["MAC — MBM AI Cloud | Attendance Summary"])
+    if department:
+        writer.writerow([f"Department: {department}"])
+    writer.writerow([])
+    writer.writerow(["#", "Roll Number", "Name", "Department", "Sessions Attended", "Total Sessions", "Attendance %"])
+    for i, s in enumerate(summaries, 1):
+        writer.writerow([i, s["roll_number"], s["student_name"], s["department"],
+                         s["sessions_attended"], s["total_sessions"], f"{s['attendance_pct']}%"])
+    output.seek(0)
+    fname = f"attendance_summary{'_' + department if department else ''}.csv"
+    return StreamingResponse(
+        iter([output.getvalue()]),
+        media_type="text/csv",
+        headers={"Content-Disposition": f'attachment; filename="{fname}"'},
+    )
 
 
 @router.get("/admin/overview")
