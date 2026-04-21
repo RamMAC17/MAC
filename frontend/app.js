@@ -1075,12 +1075,6 @@ async function renderSettings() {
    ═══════════════════════════════════════════════════════════ */
 let currentSession = null;
 let isStreaming = false;
-let chatMode = 'ask'; // 'ask' or 'agent'
-
-function canUseAgentMode() {
-  const role = String(state.user?.role || '').toLowerCase();
-  return role === 'faculty' || role === 'admin' || role === 'teacher';
-}
 
 function chatEmptyHtml() {
   return `<div class="chat-empty">
@@ -1115,11 +1109,6 @@ function bindChatChips() {
 function renderChat() {
   const el = document.getElementById('page-content');
   el.className = 'page page-chat';
-  const allowAgentMode = canUseAgentMode();
-  if (!allowAgentMode) {
-    chatMode = 'ask';
-  }
-
   const sessions = getSessions();
   el.innerHTML = `
     <div class="chat-layout">
@@ -1139,18 +1128,11 @@ function renderChat() {
         </div>
         <div class="chat-input-wrap">
           <div class="chat-input-box">
-            <textarea id="chat-input" placeholder="Ask MAC anything..." rows="1"></textarea>
+            <textarea id="chat-input" placeholder="Message MAC..." rows="1"></textarea>
             <div class="chat-input-actions">
               <div class="chat-input-left">
                 <select id="model-select" class="model-pill"><option value="auto" selected>Auto</option></select>
-                ${allowAgentMode
-                  ? `<div class="agent-toggle" id="agent-toggle">
-                  <span class="agent-mode-label active" data-mode="ask">Ask</span>
-                  <span class="agent-mode-label" data-mode="agent">Agent</span>
-                </div>`
-                  : `<div class="agent-toggle" id="agent-toggle" title="Agent mode is available for faculty/admin only">
-                  <span class="agent-mode-label active" data-mode="ask">Ask</span>
-                </div>`}
+
               </div>
               <div class="chat-input-right">
                 <span id="chat-status" class="chat-status-text"></span>
@@ -1232,23 +1214,6 @@ function bindChat() {
       }
     };
   }
-  // Agent mode toggle
-  const agentToggle = document.getElementById('agent-toggle');
-  if (agentToggle) {
-    agentToggle.querySelectorAll('.agent-mode-label').forEach(lbl => {
-      lbl.onclick = () => {
-        if (lbl.dataset.mode === 'agent' && !canUseAgentMode()) {
-          chatMode = 'ask';
-          document.getElementById('chat-input').placeholder = 'Type a message...';
-          return;
-        }
-        agentToggle.querySelectorAll('.agent-mode-label').forEach(l => l.classList.remove('active'));
-        lbl.classList.add('active');
-        chatMode = lbl.dataset.mode;
-        document.getElementById('chat-input').placeholder = chatMode === 'agent' ? 'Describe a task for the agent...' : 'Type a message...';
-      };
-    });
-  }
   loadModelOptions();
   loadActiveModelBadge();
 }
@@ -1329,16 +1294,6 @@ async function sendMessage() {
   if (!currentSession) newChat();
   const model = document.getElementById('model-select').value;
   currentSession.model = model;
-
-  if (chatMode === 'agent' && !canUseAgentMode()) {
-    chatMode = 'ask';
-  }
-
-  // Agent mode — delegate to agent runner
-  if (chatMode === 'agent') {
-    await sendAgentMessage(text);
-    return;
-  }
 
   currentSession.messages.push({ role: 'user', content: text });
   if (currentSession.title === 'New Chat') currentSession.title = text.slice(0, 40);
@@ -4437,13 +4392,91 @@ function shortModel(m) {
 }
 
 function formatMd(text) {
-  let html = esc(text);
-  html = html.replace(/```(\w*)\n([\s\S]*?)```/g, '<pre><code>$2</code></pre>');
-  html = html.replace(/```([\s\S]*?)```/g, '<pre><code>$1</code></pre>');
-  html = html.replace(/`([^`]+)`/g, '<code>$1</code>');
-  html = html.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
-  html = html.replace(/\n/g, '<br>');
+  // Split on fenced code blocks first to protect their content
+  const parts = text.split(/(```[\s\S]*?```)/g);
+  let html = '';
+  parts.forEach(part => {
+    if (part.startsWith('```')) {
+      const match = part.match(/^```(\w*)\n?([\s\S]*?)```$/);
+      const lang = (match && match[1]) ? match[1].toLowerCase() : '';
+      const code = match ? match[2] : part.slice(3, -3);
+      if (lang === 'mermaid') {
+        const id = 'mmd-' + Math.random().toString(36).slice(2);
+        html += `<div class="mermaid-block" id="${id}"><div class="mmd-loading">Rendering diagram...</div></div>`;
+        setTimeout(() => {
+          const el = document.getElementById(id);
+          if (!el || !window.mermaid) return;
+          try { mermaid.render('svg-' + id, code).then(({svg}) => { el.innerHTML = svg; }).catch(() => { el.innerHTML = '<pre>' + esc(code) + '</pre>'; }); }
+          catch(e) { el.innerHTML = '<pre>' + esc(code) + '</pre>'; }
+        }, 50);
+      } else {
+        const langLabel = lang || 'code';
+        const copyId = 'copy-' + Math.random().toString(36).slice(2);
+        let highlighted = '';
+        if (lang && window.hljs && hljs.getLanguage(lang)) {
+          try { highlighted = hljs.highlight(code, { language: lang }).value; } catch { highlighted = esc(code); }
+        } else if (window.hljs) {
+          try { highlighted = hljs.highlightAuto(code).value; } catch { highlighted = esc(code); }
+        } else {
+          highlighted = esc(code);
+        }
+        html += `<div class="code-block-wrap"><div class="code-block-header"><span class="code-lang">${esc(langLabel)}</span><button class="copy-btn" id="${copyId}" onclick="(function(btn,c){navigator.clipboard&&navigator.clipboard.writeText(c).then(()=>{btn.textContent='Copied!';setTimeout(()=>btn.textContent='Copy',1500)});})(document.getElementById('${copyId}'),${JSON.stringify(code)})">Copy</button></div><pre class="code-block hljs"><code>${highlighted}</code></pre></div>`;
+      }
+    } else {
+      // Process regular markdown in this non-code segment
+      let s = part;
+      // Tables
+      s = s.replace(/(?:(?:^|\n)\|.+\|.*(?:\n|$))+/g, tableStr => {
+        const rows = tableStr.trim().split('\n').filter(r => r.trim());
+        if (rows.length < 2) return tableStr;
+        const headerCells = rows[0].split('|').filter((_, i, a) => i > 0 && i < a.length - 1).map(c => `<th>${inlineMd(c.trim())}</th>`).join('');
+        let bodyHtml = '';
+        for (let i = 2; i < rows.length; i++) {
+          const cells = rows[i].split('|').filter((_, j, a) => j > 0 && j < a.length - 1).map(c => `<td>${inlineMd(c.trim())}</td>`).join('');
+          bodyHtml += `<tr>${cells}</tr>`;
+        }
+        return `<div class="md-table-wrap"><table class="md-table"><thead><tr>${headerCells}</tr></thead><tbody>${bodyHtml}</tbody></table></div>`;
+      });
+      // Headings
+      s = s.replace(/^### (.+)$/gm, '<h3>$1</h3>');
+      s = s.replace(/^## (.+)$/gm, '<h2>$1</h2>');
+      s = s.replace(/^# (.+)$/gm, '<h1>$1</h1>');
+      // Blockquotes
+      s = s.replace(/^> (.+)$/gm, '<blockquote>$1</blockquote>');
+      // Horizontal rule
+      s = s.replace(/^(?:---|\*\*\*|___)\s*$/gm, '<hr>');
+      // Unordered lists
+      s = s.replace(/((?:^[-*+] .+(?:\n|$))+)/gm, listStr => {
+        const items = listStr.trim().split('\n').map(l => `<li>${inlineMd(l.replace(/^[-*+] /, '').trim())}</li>`).join('');
+        return `<ul>${items}</ul>`;
+      });
+      // Ordered lists
+      s = s.replace(/((?:^\d+\. .+(?:\n|$))+)/gm, listStr => {
+        const items = listStr.trim().split('\n').map(l => `<li>${inlineMd(l.replace(/^\d+\. /, '').trim())}</li>`).join('');
+        return `<ol>${items}</ol>`;
+      });
+      // Paragraphs (blank-line separated non-block content)
+      s = s.replace(/^(?!<[huo]|<block|<hr|<div|<pre)(.+)$/gm, line => {
+        if (!line.trim()) return '';
+        return `<p>${inlineMd(line)}</p>`;
+      });
+      // Collapse multiple blank lines
+      s = s.replace(/\n{2,}/g, '\n');
+      html += s;
+    }
+  });
   return html;
+}
+
+function inlineMd(text) {
+  let s = esc(text);
+  s = s.replace(/\*\*\*(.+?)\*\*\*/g, '<strong><em>$1</em></strong>');
+  s = s.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
+  s = s.replace(/\*(.+?)\*/g, '<em>$1</em>');
+  s = s.replace(/~~(.+?)~~/g, '<del>$1</del>');
+  s = s.replace(/`([^`]+)`/g, '<span class="inline-code">$1</span>');
+  s = s.replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>');
+  return s;
 }
 
 window.logout = logout;
